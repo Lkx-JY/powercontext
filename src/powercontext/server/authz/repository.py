@@ -32,6 +32,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    delete,
     insert,
     or_,
     select,
@@ -557,6 +558,23 @@ class RelationalAccessRepository:
                 .one_or_none()
             )
         return None if row is None else _decode_candidate_owner(row)
+
+    async def delete_legacy_topic_memory_owners(self) -> int:
+        """Drop Artifact owner rows retained for the Scope-owned Topic Memory family.
+
+        The pre-#1794 Worker established an owner for every newly created Topic,
+        but no read path has ever consulted one. Delete them once so persisted
+        state matches the family's Scope-owned semantics. Candidate attestations
+        belong to other families and are never matched.
+        """
+        async with self._database.connection(self._bound_connection) as connection:
+            result = await connection.execute(
+                delete(ACCESS_OWNERS_TABLE).where(
+                    ACCESS_OWNERS_TABLE.c.owner_kind == "artifact",
+                    ACCESS_OWNERS_TABLE.c.family == "topic-memory",
+                )
+            )
+        return result.rowcount
 
     async def list_owned_resources(self, owner: PrincipalRef, /) -> tuple[ResourceRef, ...]:
         async with self._database.connection(self._bound_connection) as connection:
