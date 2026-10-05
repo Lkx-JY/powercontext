@@ -373,9 +373,9 @@ def _bind_dream_access(access: DreamAccess | None, runtime: BuiltinRuntime) -> N
 async def _remove_legacy_topic_owners(access: AccessControlService) -> None:
     """Drop the Artifact owner rows older versions retained for Topic Memory.
 
-    Topic Memory is Scope-owned, so no read path consults such a relation.
     Access tables are open only while a real service is configured, and a
-    deployment that ran an older version may still hold the stale rows.
+    deployment that ran an older version may still hold stale rows that the
+    owner-derived authorized resource filter reads back.
     """
     if not isinstance(access, AccessControlService):
         return
