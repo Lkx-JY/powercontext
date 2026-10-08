@@ -25,10 +25,18 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from powercontext.artifacts import ArtifactAddress, ArtifactRef
+from powercontext.artifacts.fusion import RrfParameters
 from powercontext.artifacts.search import ArtifactSearchContractError, ArtifactSearchMatch
 from powercontext.builtin.artifacts.memory import EmbeddingProfile
 from powercontext.builtin.artifacts.memory.canonical import canonical_embedding
-from powercontext.builtin.artifacts.search import AdmissionCounts, AdmissionFloor, analyze_fts_query, analyze_text
+from powercontext.builtin.artifacts.search import (
+    DEFAULT_RECALL_CHANNEL_WEIGHTS,
+    AdmissionCounts,
+    AdmissionFloor,
+    RecallChannelWeights,
+    analyze_fts_query,
+    analyze_text,
+)
 from powercontext.builtin.artifacts.topic_memory import (
     MAX_TOPIC_MEMORY_CHANNEL_CANDIDATES,
     MAX_TOPIC_MEMORY_QUERY_LENGTH,
@@ -80,9 +88,11 @@ class TopicMemoryRepository:
         *,
         artifacts: ArtifactRepository | None = None,
         index: TopicMemoryIndex | None = None,
+        recall_channel_weights: RecallChannelWeights = DEFAULT_RECALL_CHANNEL_WEIGHTS,
     ) -> None:
         self.artifacts = ArtifactRepository((TopicMemory,)) if artifacts is None else artifacts
         self.index = NoTopicMemoryIndex() if index is None else index
+        self.recall_channel_weights = recall_channel_weights
 
     async def initialize(self, connection: AsyncConnection, /, *, configure_retrieval_shape: bool = True) -> None:
         """Initialize indexes and reject incomplete historical Topic projections.
@@ -470,11 +480,22 @@ class TopicMemoryRepository:
             )
         analyzed = analyze_text(query)
         used_mode = self._select_mode(mode, query_vector, embedding_profile)
-        fusion = None
+        fusion: RrfParameters | None = None
         if artifact_request is not None:
-            fusion = topic_fusion_parameters(artifact_request.fusion)
-            validate_topic_weights(used_mode, fusion)
             admission = artifact_request.admission.as_floor()
+            if artifact_request.fusion is not None:
+                fusion = topic_fusion_parameters(artifact_request.fusion)
+        if fusion is None and used_mode == "hybrid":
+            fusion = RrfParameters(
+                weights={
+                    "topic_fts": self.recall_channel_weights.fts,
+                    "detail_fts": self.recall_channel_weights.fts,
+                    "topic_vector": self.recall_channel_weights.vector,
+                    "detail_vector": self.recall_channel_weights.vector,
+                }
+            )
+        if fusion is not None:
+            validate_topic_weights(used_mode, fusion)
         query_terms = tuple(sorted(set(analyzed.split())))
         if used_mode in {"fts", "hybrid"} and len(query_terms) > MAX_TOPIC_MEMORY_QUERY_TERMS:
             raise InvalidRepositoryArgumentError(

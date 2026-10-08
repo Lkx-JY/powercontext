@@ -25,15 +25,19 @@ from sqlalchemy import delete, event, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from powercontext.artifacts import ArtifactRef
+from powercontext.artifacts.fusion import FusionSelection
 from powercontext.builtin.artifacts.memory import EmbeddingProfile
-from powercontext.builtin.artifacts.search import AdmissionFloor, fts_match_query
+from powercontext.builtin.artifacts.search import AdmissionFloor, RecallChannelWeights, fts_match_query
 from powercontext.builtin.artifacts.topic_memory import (
     MAX_TOPIC_MEMORY_QUERY_LENGTH,
     MAX_TOPIC_MEMORY_SEARCH_LIMIT,
     TOPIC_MEMORY_CHUNK_MAX_COUNT,
+    TopicArtifactSearchRequest,
     TopicMemory,
     TopicMemoryBrowseCursor,
     TopicMemoryCapabilityError,
+    TopicMemoryCapabilities,
+    TopicMemoryChannelHit,
     TopicMemoryChunk,
     TopicMemoryContent,
     TopicMemoryDraft,
@@ -140,8 +144,6 @@ def _fts_index() -> CompositeTopicMemoryIndex:
 
 
 def test_public_topic_search_keeps_signed_fts_metadata_and_exact_artifacts() -> None:
-    from powercontext.builtin.artifacts.topic_memory import TopicArtifactSearchRequest
-
     async def scenario() -> None:
         index = _fts_index()
         repository = TopicMemoryRepository(index=index)
@@ -181,6 +183,137 @@ def test_public_topic_search_keeps_signed_fts_metadata_and_exact_artifacts() -> 
             assert scored.matches[0].channel_scores["topic_fts"].raw < 0
             assert scored.matches[0].channel_scores["topic_fts"].metric == "sqlite_bm25"
             assert scored.matches[0].channel_scores["detail_fts"].raw < 0
+
+    asyncio.run(scenario())
+
+
+def test_topic_search_uses_deployment_weights_unless_the_request_overrides_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    embedding_profile = EmbeddingProfile(profile_id="topic-test-v1", model="test", dimension=2)
+    lexical_ref = ArtifactRef(family="topic-memory", artifact_id="lexical", revision=1)
+    semantic_ref = ArtifactRef(family="topic-memory", artifact_id="semantic", revision=1)
+    channels = TopicMemorySearchChannels(
+        topic_fts=(
+            TopicMemoryChannelHit(
+                artifact_ref=lexical_ref,
+                title="Needle lexical topic",
+                summary="Needle lexical evidence",
+                channel="topic_fts",
+            ),
+        ),
+        topic_vector=(
+            TopicMemoryChannelHit(
+                artifact_ref=semantic_ref,
+                title="Semantic topic",
+                summary="Semantic evidence",
+                channel="topic_vector",
+                distance=0.1,
+            ),
+        ),
+    )
+
+    class StaticIndex:
+        capabilities = TopicMemoryCapabilities(
+            fts=True,
+            vector=True,
+            hybrid=True,
+            embedding_profile=embedding_profile,
+        )
+        tables = ()
+
+        async def initialize(self, _connection: AsyncConnection, /) -> None:
+            pass
+
+        async def validate_current(self, _connection: AsyncConnection, /) -> None:
+            pass
+
+        async def replace(
+            self,
+            _connection: AsyncConnection,
+            _scope_id: str,
+            _topic_ref: ArtifactRef,
+            _projection: TopicMemoryProjection,
+            /,
+        ) -> None:
+            pass
+
+        async def search(
+            self,
+            _connection: AsyncConnection,
+            _scope_id: str,
+            _request: TopicMemorySearchRequest,
+            /,
+        ) -> TopicMemorySearchChannels:
+            return channels
+
+        async def vector_complete(
+            self,
+            _connection: AsyncConnection,
+            _scope_id: str,
+            _topic_ref: ArtifactRef,
+            /,
+        ) -> bool:
+            return True
+
+    topics = {
+        ref.artifact_id: TopicMemory(
+            artifact_id=ref.artifact_id,
+            revision=ref.revision,
+            content=TopicMemoryContent(title=ref.artifact_id, summary="Evidence", detail="Evidence detail"),
+        )
+        for ref in (lexical_ref, semantic_ref)
+    }
+    repository = TopicMemoryRepository(
+        index=StaticIndex(),
+        recall_channel_weights=RecallChannelWeights(fts=3.0, vector=1.0),
+    )
+
+    async def get_topic(_connection: AsyncConnection, _scope_id: str, ref: ArtifactRef) -> TopicMemory:
+        return topics[ref.artifact_id]
+
+    monkeypatch.setattr(repository.artifacts, "get", get_topic)
+
+    async def scenario() -> None:
+        async with SQLiteProfile.open(SQLiteConfig(), tables=BUILTIN_TABLES) as profile:
+            async with profile.database.transaction() as connection:
+                await repository.initialize(connection)
+                deployment_weighted = await repository.search(
+                    connection,
+                    "scope-a",
+                    "needle",
+                    limit=2,
+                    mode="hybrid",
+                    query_vector=(1.0, 0.0),
+                    embedding_profile=embedding_profile,
+                )
+                request_weighted = await repository.search(
+                    connection,
+                    "scope-a",
+                    "needle",
+                    limit=2,
+                    mode="hybrid",
+                    query_vector=(1.0, 0.0),
+                    embedding_profile=embedding_profile,
+                    artifact_request=TopicArtifactSearchRequest(
+                        query="needle",
+                        mode="hybrid",
+                        fusion=FusionSelection(
+                            method="rrf",
+                            params={
+                                "weights": {
+                                    "topic_fts": 1.0,
+                                    "detail_fts": 1.0,
+                                    "topic_vector": 3.0,
+                                    "detail_vector": 3.0,
+                                }
+                            },
+                        ),
+                    ),
+                )
+
+        assert tuple(hit.artifact_ref for hit in deployment_weighted.hits) == (lexical_ref, semantic_ref)
+        assert tuple(hit.artifact_ref for hit in request_weighted.hits) == (semantic_ref, lexical_ref)
 
     asyncio.run(scenario())
 

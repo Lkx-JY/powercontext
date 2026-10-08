@@ -23,7 +23,7 @@ from powercontext.builtin.artifacts.memory.models import (
     MemoryHit,
     MemoryMatchedBy,
 )
-from powercontext.builtin.artifacts.search import AdmissionFloor, admits_fts_text
+from powercontext.builtin.artifacts.search import AdmissionFloor, RecallChannelWeights, admits_fts_text
 
 _RRF_CONSTANT = 60
 _MIN_SEMANTIC_SIMILARITY = 0.3
@@ -69,8 +69,13 @@ def fuse_rankings(
     fts: Sequence[MemoryChannelHit],
     vector: Sequence[MemoryChannelHit],
     limit: int,
+    channel_weights: RecallChannelWeights | None = None,
 ) -> tuple[MemoryHit, ...]:
-    """Fuse ordered channel candidates with reciprocal rank fusion."""
+    """Fuse ordered channel candidates with reciprocal rank fusion.
+
+    ``channel_weights=None`` is the historical unweighted behavior used by the
+    single-channel modes. A caller supplies weights only for hybrid search.
+    """
 
     if limit < 1:
         raise ValueError("memory search limit must be positive")  # noqa: TRY003
@@ -79,7 +84,14 @@ def fuse_rankings(
     scores: dict[_HitIdentity, float] = {}
     channels: dict[_HitIdentity, set[MemoryMatchedBy]] = {}
 
+    weights: dict[MemoryMatchedBy, float] = {
+        "fts": 1.0 if channel_weights is None else channel_weights.fts,
+        "vector": 1.0 if channel_weights is None else channel_weights.vector,
+    }
     for channel, ranking in (("fts", fts), ("vector", vector)):
+        weight = weights[channel]
+        if weight == 0.0:
+            continue
         seen: set[_HitIdentity] = set()
         for rank, candidate in enumerate(ranking, start=1):
             identity = _identity(candidate)
@@ -87,7 +99,7 @@ def fuse_rankings(
                 continue
             seen.add(identity)
             candidates.setdefault(identity, candidate)
-            scores[identity] = scores.get(identity, 0.0) + 1.0 / (_RRF_CONSTANT + rank)
+            scores[identity] = scores.get(identity, 0.0) + weight / (_RRF_CONSTANT + rank)
             channels.setdefault(identity, set()).add(channel)
 
     ordered = sorted(
@@ -107,6 +119,7 @@ def fuse_rankings(
             text=candidates[identity].text,
             score=scores[identity],
             matched_by=tuple(channel for channel in ("fts", "vector") if channel in channels[identity]),
+            score_upper_bound=sum(weights[channel] for channel in channels[identity]) / (_RRF_CONSTANT + 1),
         )
         for identity in ordered
     )

@@ -183,6 +183,42 @@ def lexical_search_score(raw: object, metric: object, /) -> tuple[float, Channel
 
 
 @dataclass(frozen=True)
+class RecallChannelWeights:
+    """Normalized relative weights for lexical and semantic recall channels.
+
+    Inputs express a ratio. The stored weights have a mean of one, so scaling both
+    configured values by the same factor cannot change a public RRF score.
+    """
+
+    fts: float = 1.0
+    vector: float = 1.0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.fts, bool) or isinstance(self.vector, bool):
+            raise TypeError("recall channel weights must be numbers")  # noqa: TRY003
+        if not math.isfinite(self.fts) or not math.isfinite(self.vector):
+            raise ValueError("recall channel weights must be finite")  # noqa: TRY003
+        if self.fts < 0.0 or self.vector < 0.0:
+            raise ValueError("recall channel weights must be non-negative")  # noqa: TRY003
+        total = self.fts + self.vector
+        if not math.isfinite(total):
+            raise ValueError("recall channel weight total must be finite")  # noqa: TRY003
+        if total <= 0.0:
+            raise ValueError("at least one recall channel weight must be positive")  # noqa: TRY003
+        # Divide each input before scaling so a finite, positive subnormal total
+        # cannot overflow through an intermediate ``2.0 / total`` value.
+        normalized_fts = 2.0 * (self.fts / total)
+        normalized_vector = 2.0 * (self.vector / total)
+        if not math.isfinite(normalized_fts) or not math.isfinite(normalized_vector):
+            raise ValueError("normalized recall channel weights must be finite")  # noqa: TRY003
+        object.__setattr__(self, "fts", normalized_fts)
+        object.__setattr__(self, "vector", normalized_vector)
+
+
+DEFAULT_RECALL_CHANNEL_WEIGHTS = RecallChannelWeights()
+
+
+@dataclass(frozen=True)
 class AdmissionCounts:
     """Per-family, per-scope admission accounting for one search.
 
