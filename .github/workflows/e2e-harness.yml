@@ -139,6 +139,8 @@ jobs:
             tests/e2e/test_context_text_assembly.py \
             tests/builtin/persistence/test_recall_effort_statistics.py \
             tests/builtin/persistence/test_mysql_schema.py \
+            tests/builtin/persistence/test_sqlite_profile.py \
+            tests/builtin/persistence/test_database_snapshots.py \
             --junitxml=.powercontext/recall-effort-ci/regressions.xml -q -rs
 
       - name: Collect the database log
