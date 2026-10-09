@@ -159,11 +159,13 @@ The recall channel weights are a ratio and apply only after hybrid candidates pa
 Scaling both values equally has no effect. Setting one value to `0` excludes that channel from hybrid fusion, but a
 higher weight cannot restore a candidate rejected before fusion. A zero weight does not disable that channel's
 retrieval or admission work: vector embeddings may still be generated, and retrieval/admission counts still include
-the zero-weight channel. After normalization, each non-zero channel weight must be at least the smallest normal IEEE
-754 binary64 value (`2.2250738585072014e-308`); smaller values are rejected at startup. Only an explicit `0` disables
-a channel's fusion contribution. Evaluate weight changes together with recall-gate rounds, semantic admission floors,
-and historical Topic candidate selection instead of treating the knobs independently. In particular, weighting FTS
-more heavily can move a Topic's normalized score across
+the zero-weight channel. A Topic Artifact search request that supplies its own `fusion` parameters replaces the
+deployment recall weights entirely. The deployment weights apply only when the request does not specify `fusion`
+parameters. After normalization, each non-zero channel weight must be at least the smallest normal IEEE 754 binary64
+value (`2.2250738585072014e-308`); smaller values are rejected at startup. Only an explicit `0` disables a channel's
+fusion contribution. Evaluate weight changes together with recall-gate rounds, semantic admission floors, and
+historical Topic candidate selection instead of treating the knobs independently. In particular, weighting FTS more
+heavily can move a Topic's normalized score across
 `POWERCONTEXT_SERVER_RUNTIME_TOPIC_MEMORY_HISTORY_RRF_THRESHOLD` (default `70`) and change which historical Topics
 are sent to the planner.
 

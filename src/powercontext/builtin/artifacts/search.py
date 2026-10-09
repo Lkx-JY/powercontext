@@ -31,8 +31,8 @@ _FTS_MIN_QUERY_COVERAGE = 0.25
 _FTS_MIN_MATCHED_TERMS = 2
 _FTS_SHORT_QUERY_MAX_TERMS = 2
 _MIN_SEMANTIC_SIMILARITY = 0.3
-# RRF divides normalized weights again, so accepting a subnormal non-zero value
-# can turn an enabled channel into zero during fusion.
+# Reject subnormal normalized weights. This conservative boundary leaves
+# headroom for RRF division and prevents more extreme ratios from underflowing.
 _MIN_NORMALIZED_RECALL_CHANNEL_WEIGHT = sys.float_info.min
 
 # Query-only normalization: persisted Analyzer v1 projections remain unchanged. Negations
@@ -219,7 +219,8 @@ class RecallChannelWeights:
             self.vector > 0.0 and normalized_vector < _MIN_NORMALIZED_RECALL_CHANNEL_WEIGHT
         ):
             raise ValueError(  # noqa: TRY003
-                "recall channel weight ratio is too extreme to preserve non-zero RRF contributions"
+                "normalized non-zero recall channel weights must be at least "
+                "the smallest normal IEEE 754 binary64 value"
             )
         object.__setattr__(self, "fts", normalized_fts)
         object.__setattr__(self, "vector", normalized_vector)

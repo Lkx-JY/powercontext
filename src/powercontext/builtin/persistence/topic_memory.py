@@ -480,22 +480,9 @@ class TopicMemoryRepository:
             )
         analyzed = analyze_text(query)
         used_mode = self._select_mode(mode, query_vector, embedding_profile)
-        fusion: RrfParameters | None = None
         if artifact_request is not None:
             admission = artifact_request.admission.as_floor()
-            if artifact_request.fusion is not None:
-                fusion = topic_fusion_parameters(artifact_request.fusion)
-        if fusion is None and used_mode == "hybrid":
-            fusion = RrfParameters(
-                weights={
-                    "topic_fts": self.recall_channel_weights.fts,
-                    "detail_fts": self.recall_channel_weights.fts,
-                    "topic_vector": self.recall_channel_weights.vector,
-                    "detail_vector": self.recall_channel_weights.vector,
-                }
-            )
-        if fusion is not None:
-            validate_topic_weights(used_mode, fusion)
+        fusion = self._search_fusion_parameters(used_mode, artifact_request)
         query_terms = tuple(sorted(set(analyzed.split())))
         if used_mode in {"fts", "hybrid"} and len(query_terms) > MAX_TOPIC_MEMORY_QUERY_TERMS:
             raise InvalidRepositoryArgumentError(
@@ -806,6 +793,29 @@ class TopicMemoryRepository:
         if selected not in {"fts", "vector", "hybrid"}:
             raise TopicMemoryCapabilityError(selected)
         return selected
+
+    def _search_fusion_parameters(
+        self,
+        mode: TopicMemoryUsedSearchMode,
+        request: TopicArtifactSearchRequest | None,
+    ) -> RrfParameters | None:
+        """Use an explicit request policy or the deployment's hybrid default."""
+
+        if request is not None and request.fusion is not None:
+            params = topic_fusion_parameters(request.fusion)
+        elif mode == "hybrid":
+            params = RrfParameters(
+                weights={
+                    "topic_fts": self.recall_channel_weights.fts,
+                    "detail_fts": self.recall_channel_weights.fts,
+                    "topic_vector": self.recall_channel_weights.vector,
+                    "detail_vector": self.recall_channel_weights.vector,
+                }
+            )
+        else:
+            return None
+        validate_topic_weights(mode, params)
+        return params
 
     def _canonical_query_vector(
         self,

@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import delete, event, func, insert, select, text, update
+from sqlalchemy import Table, delete, event, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from powercontext.artifacts import ArtifactRef
@@ -35,8 +35,8 @@ from powercontext.builtin.artifacts.topic_memory import (
     TopicArtifactSearchRequest,
     TopicMemory,
     TopicMemoryBrowseCursor,
-    TopicMemoryCapabilityError,
     TopicMemoryCapabilities,
+    TopicMemoryCapabilityError,
     TopicMemoryChannelHit,
     TopicMemoryChunk,
     TopicMemoryContent,
@@ -45,6 +45,7 @@ from powercontext.builtin.artifacts.topic_memory import (
     TopicMemoryProjectionError,
     TopicMemorySearchChannels,
     TopicMemorySearchRequest,
+    TopicMemorySearchResult,
     TopicMemoryStorageInvariantError,
     prepare_topic_memory_projection,
 )
@@ -187,7 +188,7 @@ def test_public_topic_search_keeps_signed_fts_metadata_and_exact_artifacts() -> 
     asyncio.run(scenario())
 
 
-def test_topic_search_uses_deployment_weights_unless_the_request_overrides_them(
+def test_topic_search_deployment_weights_change_results_and_request_fusion_replaces_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     embedding_profile = EmbeddingProfile(profile_id="topic-test-v1", model="test", dimension=2)
@@ -220,7 +221,7 @@ def test_topic_search_uses_deployment_weights_unless_the_request_overrides_them(
             hybrid=True,
             embedding_profile=embedding_profile,
         )
-        tables = ()
+        tables: tuple[Table, ...] = ()
 
         async def initialize(self, _connection: AsyncConnection, /) -> None:
             pass
@@ -264,21 +265,44 @@ def test_topic_search_uses_deployment_weights_unless_the_request_overrides_them(
         )
         for ref in (lexical_ref, semantic_ref)
     }
-    repository = TopicMemoryRepository(
+    default_repository = TopicMemoryRepository(index=StaticIndex())
+    equal_repository = TopicMemoryRepository(
+        index=StaticIndex(),
+        recall_channel_weights=RecallChannelWeights(fts=1.0, vector=1.0),
+    )
+    fts_weighted_repository = TopicMemoryRepository(
         index=StaticIndex(),
         recall_channel_weights=RecallChannelWeights(fts=3.0, vector=1.0),
+    )
+    vector_weighted_repository = TopicMemoryRepository(
+        index=StaticIndex(),
+        recall_channel_weights=RecallChannelWeights(fts=1.0, vector=3.0),
     )
 
     async def get_topic(_connection: AsyncConnection, _scope_id: str, ref: ArtifactRef) -> TopicMemory:
         return topics[ref.artifact_id]
 
-    monkeypatch.setattr(repository.artifacts, "get", get_topic)
+    for repository in (
+        default_repository,
+        equal_repository,
+        fts_weighted_repository,
+        vector_weighted_repository,
+    ):
+        monkeypatch.setattr(repository.artifacts, "get", get_topic)
 
     async def scenario() -> None:
-        async with SQLiteProfile.open(SQLiteConfig(), tables=BUILTIN_TABLES) as profile:
-            async with profile.database.transaction() as connection:
-                await repository.initialize(connection)
-                deployment_weighted = await repository.search(
+        async with (
+            SQLiteProfile.open(SQLiteConfig(), tables=BUILTIN_TABLES) as profile,
+            profile.database.transaction() as connection,
+        ):
+            await default_repository.initialize(connection)
+
+            async def search(
+                repository: TopicMemoryRepository,
+                *,
+                artifact_request: TopicArtifactSearchRequest | None = None,
+            ) -> TopicMemorySearchResult:
+                return await repository.search(
                     connection,
                     "scope-a",
                     "needle",
@@ -286,34 +310,45 @@ def test_topic_search_uses_deployment_weights_unless_the_request_overrides_them(
                     mode="hybrid",
                     query_vector=(1.0, 0.0),
                     embedding_profile=embedding_profile,
-                )
-                request_weighted = await repository.search(
-                    connection,
-                    "scope-a",
-                    "needle",
-                    limit=2,
-                    mode="hybrid",
-                    query_vector=(1.0, 0.0),
-                    embedding_profile=embedding_profile,
-                    artifact_request=TopicArtifactSearchRequest(
-                        query="needle",
-                        mode="hybrid",
-                        fusion=FusionSelection(
-                            method="rrf",
-                            params={
-                                "weights": {
-                                    "topic_fts": 1.0,
-                                    "detail_fts": 1.0,
-                                    "topic_vector": 3.0,
-                                    "detail_vector": 3.0,
-                                }
-                            },
-                        ),
-                    ),
+                    artifact_request=artifact_request,
                 )
 
-        assert tuple(hit.artifact_ref for hit in deployment_weighted.hits) == (lexical_ref, semantic_ref)
-        assert tuple(hit.artifact_ref for hit in request_weighted.hits) == (semantic_ref, lexical_ref)
+            default_result = await search(default_repository)
+            equal_result = await search(equal_repository)
+            fts_weighted_result = await search(fts_weighted_repository)
+            vector_weighted_result = await search(vector_weighted_repository)
+            request_weighted_result = await search(
+                fts_weighted_repository,
+                artifact_request=TopicArtifactSearchRequest(
+                    query="needle",
+                    mode="hybrid",
+                    fusion=FusionSelection(
+                        method="rrf",
+                        params={
+                            "weights": {
+                                "topic_vector": 3.0,
+                                "detail_vector": 3.0,
+                            }
+                        },
+                    ),
+                ),
+            )
+
+        default_scores = {hit.artifact_ref.artifact_id: hit.score for hit in default_result.hits}
+        equal_scores = {hit.artifact_ref.artifact_id: hit.score for hit in equal_result.hits}
+        fts_weighted_scores = {hit.artifact_ref.artifact_id: hit.score for hit in fts_weighted_result.hits}
+        vector_weighted_scores = {hit.artifact_ref.artifact_id: hit.score for hit in vector_weighted_result.hits}
+        request_weighted_scores = {hit.artifact_ref.artifact_id: hit.score for hit in request_weighted_result.hits}
+
+        assert default_result.hits == equal_result.hits
+        assert default_scores == {"lexical": 25.0, "semantic": 25.0}
+        assert equal_scores == default_scores
+        assert tuple(hit.artifact_ref for hit in fts_weighted_result.hits) == (lexical_ref, semantic_ref)
+        assert fts_weighted_scores == {"lexical": 37.5, "semantic": 12.5}
+        assert tuple(hit.artifact_ref for hit in vector_weighted_result.hits) == (semantic_ref, lexical_ref)
+        assert vector_weighted_scores == {"lexical": 12.5, "semantic": 37.5}
+        assert tuple(hit.artifact_ref for hit in request_weighted_result.hits) == (semantic_ref, lexical_ref)
+        assert request_weighted_scores == vector_weighted_scores
 
     asyncio.run(scenario())
 

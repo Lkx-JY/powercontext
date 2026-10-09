@@ -23,6 +23,7 @@ import pytest
 from pydantic import ValidationError
 
 from powercontext import ArtifactRef
+from powercontext.artifacts.fusion import RrfParameters
 from powercontext.builtin.artifacts.memory import MemoryChannelHit, MemoryMatchedBy
 from powercontext.builtin.artifacts.memory.fusion import fuse_rankings
 from powercontext.builtin.artifacts.search import RecallChannelWeights
@@ -30,8 +31,8 @@ from powercontext.builtin.artifacts.topic_memory import (
     TopicMemoryChannelHit,
     TopicMemoryMatchedBy,
     TopicMemorySearchChannels,
-    fuse_topic_memory_rankings,
 )
+from powercontext.builtin.artifacts.topic_memory.fusion import _fuse_topic_memory_rankings
 from powercontext.builtin.persistence.sqlite import SQLiteConfig
 from powercontext.builtin.runtime import BuiltinConfig, RuntimeConfig, composition
 from powercontext.server.settings import ServerSettings
@@ -123,7 +124,7 @@ def test_extreme_nonzero_recall_weight_ratios_are_rejected_at_configuration_time
     fts: float,
     vector: float,
 ) -> None:
-    with pytest.raises(ValidationError, match="ratio is too extreme to preserve non-zero RRF contributions"):
+    with pytest.raises(ValidationError, match="must be at least the smallest normal IEEE 754 binary64 value"):
         RuntimeConfig(recall_fts_weight=fts, recall_vector_weight=vector)
 
 
@@ -140,7 +141,7 @@ def test_extreme_nonzero_recall_weight_ratios_are_rejected_by_the_domain_type(
     fts: float,
     vector: float,
 ) -> None:
-    with pytest.raises(ValueError, match="ratio is too extreme to preserve non-zero RRF contributions"):
+    with pytest.raises(ValueError, match="must be at least the smallest normal IEEE 754 binary64 value"):
         RecallChannelWeights(fts=fts, vector=vector)
 
 
@@ -178,15 +179,22 @@ def test_smallest_accepted_channel_weight_remains_usable_in_memory_and_topic_fus
         channel=topic_channel,
         distance=0.1 if topic_channel == "topic_vector" else None,
     )
-    topic_hits = fuse_topic_memory_rankings(
+    topic_hits = _fuse_topic_memory_rankings(
         "needle",
         TopicMemorySearchChannels(
             topic_fts=(topic_candidate,) if topic_channel == "topic_fts" else (),
             topic_vector=(topic_candidate,) if topic_channel == "topic_vector" else (),
         ),
         1,
-        channel_weights=weights,
-    )
+        fusion=RrfParameters(
+            weights={
+                "topic_fts": weights.fts,
+                "detail_fts": weights.fts,
+                "topic_vector": weights.vector,
+                "detail_vector": weights.vector,
+            }
+        ),
+    ).hits
 
     assert len(memory_hits) == 1
     assert memory_hits[0].matched_by == (memory_channel,)
@@ -279,5 +287,5 @@ def test_extreme_recall_channel_weight_ratio_from_server_environment_is_rejected
     monkeypatch.setenv("POWERCONTEXT_SERVER_RUNTIME_RECALL_FTS_WEIGHT", fts_weight)
     monkeypatch.setenv("POWERCONTEXT_SERVER_RUNTIME_RECALL_VECTOR_WEIGHT", vector_weight)
 
-    with pytest.raises(ValidationError, match="ratio is too extreme to preserve non-zero RRF contributions"):
+    with pytest.raises(ValidationError, match="must be at least the smallest normal IEEE 754 binary64 value"):
         ServerSettings()
