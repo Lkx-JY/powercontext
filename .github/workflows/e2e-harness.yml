@@ -7,6 +7,14 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Validation suite to run
+        type: choice
+        default: all
+        options:
+          - all
+          - recall-effort
 
 permissions:
   contents: read
@@ -21,14 +29,7 @@ concurrency:
 
 jobs:
   validate:
-    # The personal fork's manual recall-effort run uses its dedicated contract
-    # job instead of rebuilding the unrelated workload harness.
-    if: >-
-      ${{
-        github.repository != 'chenncy/powercontext' ||
-        github.event_name != 'workflow_dispatch' ||
-        github.ref != 'refs/heads/codex/recall-effort-metrics'
-      }}
+    if: github.event_name != 'workflow_dispatch' || inputs.suite != 'recall-effort'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -58,12 +59,6 @@ jobs:
 
   recall-effort:
     name: Recall effort (OceanBase)
-    if: >-
-      ${{
-        github.repository == 'chenncy/powercontext' &&
-        github.event_name == 'workflow_dispatch' &&
-        github.ref == 'refs/heads/codex/recall-effort-metrics'
-      }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -71,7 +66,7 @@ jobs:
       POWERCONTEXT_TEST_OCEANBASE_URL: >-
         mysql+aoceanbase://root%40test:powercontext-e2e@127.0.0.1:2881/powercontext_test?charset=utf8mb4
     steps:
-      - name: Check out the selected feature branch
+      - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0

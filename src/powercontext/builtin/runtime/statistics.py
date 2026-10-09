@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -266,8 +267,30 @@ class RelationalScopedStatistics:
         """
 
         measurement = recall_effort_measurement(effort)
-        async with self._database.statistics_transaction(self._write_timeout_seconds) as connection:
-            await self._repository.record_recall_effort(connection, self._scope_id, usage_date, measurement)
+
+        async def persist() -> None:
+            async with self._database.statistics_transaction(self._write_timeout_seconds) as connection:
+                await self._repository.record_recall_effort(connection, self._scope_id, usage_date, measurement)
+
+        # SQLite invalidates a connection when cancellation enters its driver.
+        # Shield the entire transaction, including checkout and cleanup, so a
+        # cancelled preparation cannot destroy a shared in-memory database.
+        write = asyncio.create_task(persist(), name="powercontext-recall-effort")
+        try:
+            await asyncio.shield(write)
+        except asyncio.CancelledError:
+            # Keep ownership until the native write budget and cleanup settle.
+            # Repeated caller cancellation must not reach the database either.
+            while not write.done():
+                try:
+                    await asyncio.shield(write)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not write.cancelled():
+                write.exception()
+            raise
 
     async def _cited_keys(self, connection: AsyncConnection) -> tuple[tuple[str, str, int, str], ...]:
         """Return the Experience signature keys this scope's Handoffs currently cite.

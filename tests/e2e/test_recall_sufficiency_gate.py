@@ -70,6 +70,7 @@ from powercontext.builtin.runtime.recall_sufficiency import (
     RecallSufficiencyGate,
     recall_effort_measurement,
 )
+from powercontext.builtin.runtime.topic_memory_search import TopicMemorySearcher
 from powercontext.builtin.scope import ScopeDraft
 
 # A three-term query is required: the round-zero floor only differs from the round-one floor
@@ -394,7 +395,14 @@ def test_topic_embedding_timeout_is_paid_once_per_prepare(tmp_path, monkeypatch)
         ) as runtime:
             scope_id = await _create_scope(runtime, "topic-timeout")
             await _seed_topic_memories(runtime, scope_id, 1)
-            runtime._topic_memory_embedding_model = embedding
+            assert runtime._topic_memory_search is not None
+            runtime._topic_memory_searcher = TopicMemorySearcher(
+                search=runtime._topic_memory_search,
+                get=runtime._topic_memory_get,
+                browse=runtime._topic_memory_browse,
+                embedding_model=embedding,
+                observer=runtime._topic_memory_search_observer,
+            )
             request = _memory_request(assembly=_TOPIC_MEMORY_ONLY)
             for attempt in (1, 2):
                 build, effort = await _prepare_build(runtime, scope_id, request)
@@ -985,5 +993,66 @@ def test_default_recorder_write_contention_is_bounded_and_does_not_break_later_o
             await _seed(runtime, scope_id, ["later business write still succeeds"])
         assert len(elapsed) == 1
         assert elapsed[0] < 1.0  # Accounting cannot consume SQLite's normal 5-second busy timeout.
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("repeated_cancel", [False, True])
+def test_cancelled_preparation_preserves_memory_and_finishes_accounting_once(
+    tmp_path, monkeypatch, repeated_cancel
+) -> None:
+    original = StatisticsRepository.record_recall_effort
+
+    async def scenario() -> None:
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        async def delayed_insert(repository, connection, scope_id, usage_date, measurement) -> None:
+            driver = (await connection.get_raw_connection()).driver_connection
+
+            def pause_insert() -> int:
+                loop.call_soon_threadsafe(entered.set)
+                time.sleep(0.15)
+                return 1
+
+            await driver.create_function("pause_effort_insert", 0, pause_insert)
+            await connection.exec_driver_sql(
+                "CREATE TEMP TRIGGER pause_effort_insert BEFORE INSERT ON pc_recall_effort_daily "
+                "BEGIN SELECT pause_effort_insert(); END"
+            )
+            try:
+                await original(repository, connection, scope_id, usage_date, measurement)
+            finally:
+                await connection.exec_driver_sql("DROP TRIGGER IF EXISTS pause_effort_insert")
+
+        async with _runtime(
+            tmp_path / "cancel-effort.db", RuntimeConfig(recall_gate_enabled=True), in_memory=True
+        ) as runtime:
+            scope_id = await _create_scope(runtime, "cancel-effort")
+            await _seed(runtime, scope_id, ["alpha beta gamma preserved evidence"])
+            expected, _ = await _prepare_build(runtime, scope_id, _memory_request())
+            before = await _revision_state(runtime, scope_id)
+            monkeypatch.setattr(StatisticsRepository, "record_recall_effort", delayed_insert)
+            preparing = asyncio.create_task(runtime.context.for_scope(scope_id).prepare(_memory_request()))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=5)
+                preparing.cancel()
+                if repeated_cancel:
+                    await asyncio.sleep(0)
+                    preparing.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await preparing
+            finally:
+                monkeypatch.setattr(StatisticsRepository, "record_recall_effort", original)
+
+            assert await _revision_state(runtime, scope_id) == before
+            rows = await _effort_rows(runtime)
+            assert len(rows) == 1
+            assert rows[0]["preparations"] == 1
+            assert await runtime.context.for_scope(scope_id).prepare(_memory_request()) == expected.context
+            rows = await _effort_rows(runtime)
+            assert len(rows) == 1
+            assert rows[0]["preparations"] == 2
+            await _seed(runtime, scope_id, ["a later business write still works"])
 
     asyncio.run(scenario())
