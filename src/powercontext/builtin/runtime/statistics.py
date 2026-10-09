@@ -50,6 +50,7 @@ from powercontext.builtin.persistence.statistics import (
 )
 from powercontext.builtin.persistence.tables import ARTIFACT_HEADS_TABLE
 from powercontext.builtin.runtime._model_usage import _ModelUsageRecorder
+from powercontext.builtin.runtime.recall_sufficiency import RecallEffort, recall_effort_measurement
 from powercontext.builtin.runtime.recurrence import handoff_experience_citations
 from powercontext.builtin.scope import ScopeSelection
 from powercontext.builtin.statistics import (
@@ -122,6 +123,7 @@ class RelationalScopedStatistics:
         artifacts: ArtifactRepository,
         token_estimator: TokenEstimatorProfile | None,
         model_usage: _ModelUsageRecorder,
+        write_timeout_seconds: float = 1.0,
     ) -> None:
         self._database = database
         self._scope_id = scope_id
@@ -133,6 +135,7 @@ class RelationalScopedStatistics:
         self._artifacts = artifacts
         self._token_estimator = token_estimator
         self._model_usage = model_usage
+        self._write_timeout_seconds = write_timeout_seconds
 
     async def overview(self, period: StatisticsPeriod, as_of: datetime, /) -> Statistics:
         captured_at = _as_utc(as_of)
@@ -254,6 +257,17 @@ class RelationalScopedStatistics:
                 usage_date,
                 measurement,
             )
+
+    async def record_recall_effort(self, effort: RecallEffort, usage_date: date, /) -> None:
+        """Persist the final trace once, within the normal statistics write budget.
+
+        No retry or evidence reads occur here. The preparation boundary isolates
+        every recorder failure from the already-built context.
+        """
+
+        measurement = recall_effort_measurement(effort)
+        async with self._database.statistics_transaction(self._write_timeout_seconds) as connection:
+            await self._repository.record_recall_effort(connection, self._scope_id, usage_date, measurement)
 
     async def _cited_keys(self, connection: AsyncConnection) -> tuple[tuple[str, str, int, str], ...]:
         """Return the Experience signature keys this scope's Handoffs currently cite.
