@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Mapping
 from typing import Any, Literal, Self
@@ -212,11 +211,7 @@ class RuntimeConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_recall_channel_weights(self) -> RuntimeConfig:
-        total = self.recall_fts_weight + self.recall_vector_weight
-        if not math.isfinite(total):
-            raise ValueError("recall channel weight total must be finite")  # noqa: TRY003
-        if total <= 0.0:
-            raise ValueError("at least one recall channel weight must be positive")  # noqa: TRY003
+        RecallChannelWeights(fts=self.recall_fts_weight, vector=self.recall_vector_weight)
         return self
 
     @property

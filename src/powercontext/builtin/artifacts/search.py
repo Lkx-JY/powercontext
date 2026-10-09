@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import re
+import sys
 import unicodedata
 from dataclasses import dataclass
 from itertools import pairwise
@@ -30,6 +31,9 @@ _FTS_MIN_QUERY_COVERAGE = 0.25
 _FTS_MIN_MATCHED_TERMS = 2
 _FTS_SHORT_QUERY_MAX_TERMS = 2
 _MIN_SEMANTIC_SIMILARITY = 0.3
+# RRF divides normalized weights again, so accepting a subnormal non-zero value
+# can turn an enabled channel into zero during fusion.
+_MIN_NORMALIZED_RECALL_CHANNEL_WEIGHT = sys.float_info.min
 
 # Query-only normalization: persisted Analyzer v1 projections remain unchanged. Negations
 # are deliberately absent; domain constraints such as "without a backup" remain evidence.
@@ -211,6 +215,12 @@ class RecallChannelWeights:
         normalized_vector = 2.0 * (self.vector / total)
         if not math.isfinite(normalized_fts) or not math.isfinite(normalized_vector):
             raise ValueError("normalized recall channel weights must be finite")  # noqa: TRY003
+        if (self.fts > 0.0 and normalized_fts < _MIN_NORMALIZED_RECALL_CHANNEL_WEIGHT) or (
+            self.vector > 0.0 and normalized_vector < _MIN_NORMALIZED_RECALL_CHANNEL_WEIGHT
+        ):
+            raise ValueError(  # noqa: TRY003
+                "recall channel weight ratio is too extreme to preserve non-zero RRF contributions"
+            )
         object.__setattr__(self, "fts", normalized_fts)
         object.__setattr__(self, "vector", normalized_vector)
 
