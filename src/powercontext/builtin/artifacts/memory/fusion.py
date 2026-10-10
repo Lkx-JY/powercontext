@@ -23,7 +23,12 @@ from powercontext.builtin.artifacts.memory.models import (
     MemoryHit,
     MemoryMatchedBy,
 )
-from powercontext.builtin.artifacts.search import AdmissionFloor, RecallChannelWeights, admits_fts_text
+from powercontext.builtin.artifacts.search import (
+    AdmissionFloor,
+    RecallChannelWeights,
+    admits_fts_text,
+    unit_l2_cosine_similarity,
+)
 
 _RRF_CONSTANT = 60
 _MIN_SEMANTIC_SIMILARITY = 0.3
@@ -56,12 +61,8 @@ def admit_vector_candidates(
     return tuple(
         candidate
         for candidate in candidates
-        if candidate.distance is not None and _unit_l2_cosine_similarity(candidate.distance) >= baseline
+        if candidate.distance is not None and unit_l2_cosine_similarity(candidate.distance) >= baseline
     )
-
-
-def _unit_l2_cosine_similarity(distance: float) -> float:
-    return max(-1.0, min(1.0, 1.0 - distance**2 / 2.0))
 
 
 def fuse_rankings(
@@ -83,6 +84,7 @@ def fuse_rankings(
     candidates: dict[_HitIdentity, MemoryChannelHit] = {}
     scores: dict[_HitIdentity, float] = {}
     channels: dict[_HitIdentity, set[MemoryMatchedBy]] = {}
+    relevance: dict[_HitIdentity, float] = {}
 
     weights: dict[MemoryMatchedBy, float] = {
         "fts": 1.0 if channel_weights is None else channel_weights.fts,
@@ -101,6 +103,9 @@ def fuse_rankings(
             candidates.setdefault(identity, candidate)
             scores[identity] = scores.get(identity, 0.0) + weight / (_RRF_CONSTANT + rank)
             channels.setdefault(identity, set()).add(channel)
+            if channel == "vector" and candidate.distance is not None:
+                similarity = unit_l2_cosine_similarity(candidate.distance)
+                relevance[identity] = max(relevance.get(identity, -1.0), similarity)
 
     ordered = sorted(
         candidates,
@@ -120,6 +125,7 @@ def fuse_rankings(
             score=scores[identity],
             matched_by=tuple(channel for channel in ("fts", "vector") if channel in channels[identity]),
             score_upper_bound=sum(weights[channel] for channel in channels[identity]) / (_RRF_CONSTANT + 1),
+            relevance=relevance.get(identity),
         )
         for identity in ordered
     )

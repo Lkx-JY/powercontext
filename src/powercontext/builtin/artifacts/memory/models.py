@@ -218,6 +218,7 @@ class MemoryHit(BaseModel):
     score: float
     matched_by: tuple[MemoryMatchedBy, ...]
     score_upper_bound: float | None = Field(default=None, gt=0.0, allow_inf_nan=False, exclude=True)
+    relevance: float | None = Field(default=None, ge=-1.0, le=1.0, allow_inf_nan=False, exclude=True)
 
 
 class MemoryRerankTrace(BaseModel):
