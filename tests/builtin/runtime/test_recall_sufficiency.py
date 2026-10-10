@@ -100,6 +100,7 @@ def _topic_candidate(
     artifact_id: str = "topic",
     revision: int = 1,
     text: str = "zzz",
+    relevance: float | None = None,
 ) -> RecallCandidate:
     return RecallCandidate(
         family="topic-memory",
@@ -109,6 +110,7 @@ def _topic_candidate(
         entry_version_id=None,
         score=score,
         text=text,
+        relevance=relevance,
     )
 
 
@@ -143,6 +145,7 @@ def _topic_hit(
     title: str = "Title",
     summary: str = "Summary",
     snippet: str | None = None,
+    relevance: float | None = None,
 ) -> TopicMemorySearchHit:
     return TopicMemorySearchHit(
         artifact_ref=ArtifactRef(family="topic-memory", artifact_id=artifact_id, revision=revision),
@@ -151,6 +154,7 @@ def _topic_hit(
         snippet=snippet,
         score=score,
         matched_by=("topic_fts",),
+        relevance=relevance,
     )
 
 
@@ -287,7 +291,10 @@ def test_gate_reports_thin_families_when_a_selected_family_returned_nothing() ->
 
 def test_gate_reports_weak_top_one_for_a_weak_scoring_family() -> None:
     policy = RecallSufficiencyPolicy(min_top_score=0.35)
-    candidates = (_topic_candidate(0.2), _topic_candidate(0.1, artifact_id="topic-2"))
+    candidates = (
+        _topic_candidate(1.0, relevance=0.2),
+        _topic_candidate(0.9, artifact_id="topic-2", relevance=0.1),
+    )
     assessment = RecallSufficiencyGate().assess(
         candidates,
         "alpha beta gamma delta",
@@ -300,9 +307,143 @@ def test_gate_reports_weak_top_one_for_a_weak_scoring_family() -> None:
     assert assessment.signals.scored_families == 1
 
 
+def test_gate_reports_thin_candidates_even_when_the_top_is_weak() -> None:
+    """A thin and weak set still expands: lowering admission can recover
+    round-zero-rejected evidence, so ``weak-top-1`` must not stop expansion
+    before the thin check runs."""
+    policy = RecallSufficiencyPolicy(min_candidates=3)
+    candidates = (
+        _topic_candidate(1.0, relevance=0.2),
+        _topic_candidate(0.9, artifact_id="topic-2", relevance=0.1),
+    )
+    assessment = RecallSufficiencyGate().assess(
+        candidates,
+        "alpha beta gamma delta",
+        policy,
+        scope_has_content=True,
+        families_expected=1,
+    )
+    assert assessment.sufficient is False
+    assert assessment.reason == REASON_THIN_CANDIDATES
+
+
+def _scoped_memory_candidate(
+    text: str,
+    *,
+    scope_id: str,
+    relevance: float | None,
+) -> RecallCandidate:
+    return RecallCandidate(
+        family="memory",
+        artifact_id=f"memory-{scope_id}",
+        revision=1,
+        entry_id="entry",
+        entry_version_id="entry-v1",
+        score=1.0,
+        text=text,
+        relevance=relevance,
+        scope_id=scope_id,
+    )
+
+
+def test_gate_scores_each_scope_by_its_own_first_fused_hit() -> None:
+    """Each Scope's fusion run applies the first-hit rule independently of Scope order."""
+    policy = RecallSufficiencyPolicy()
+    scope_a = (
+        _scoped_memory_candidate("alpha beta", scope_id="scope-a", relevance=None),
+        _scoped_memory_candidate("alpha beta", scope_id="scope-a", relevance=0.9),
+    )
+    scope_b = (_scoped_memory_candidate("alpha beta", scope_id="scope-b", relevance=0.31),)
+
+    gate = RecallSufficiencyGate()
+    a_first = gate.assess(scope_a + scope_b, "alpha beta", policy, scope_has_content=True, families_expected=1)
+    b_first = gate.assess(scope_b + scope_a, "alpha beta", policy, scope_has_content=True, families_expected=1)
+
+    assert a_first.reason == b_first.reason == REASON_WEAK_TOP_ONE
+    assert a_first.signals.top_score == b_first.signals.top_score == pytest.approx(0.31)
+    assert a_first.signals.scored_families == b_first.signals.scored_families == 1
+
+
+def test_build_recall_candidates_wires_scope_ids_into_the_per_scope_rule() -> None:
+    """Deleting ``memory_scope_ids`` must change observable behavior: without it every
+    Memory hit shares one group and the flat first hit decides scoring for all Scopes."""
+    fts_first = MemoryHit(
+        memory_ref=MEMORY_REF,
+        entry_id="a-fts",
+        entry_version_id="a-fts-v1",
+        text="alpha beta",
+        score=1 / 61,
+        matched_by=("fts",),
+    )
+    deep_vector = MemoryHit(
+        memory_ref=MEMORY_REF,
+        entry_id="a-vector",
+        entry_version_id="a-vector-v1",
+        text="alpha beta",
+        score=1 / 62,
+        matched_by=("vector",),
+        relevance=0.9,
+    )
+    ref_vector = MemoryHit(
+        memory_ref=ArtifactRef(family="memory", artifact_id="memory-b", revision=1),
+        entry_id="b-vector",
+        entry_version_id="b-vector-v1",
+        text="alpha beta",
+        score=1 / 61,
+        matched_by=("vector",),
+        relevance=0.31,
+    )
+    gate = RecallSufficiencyGate()
+    policy = RecallSufficiencyPolicy()
+
+    scoped = build_recall_candidates(
+        memory_hits=(fts_first, deep_vector, ref_vector),
+        memory_scope_ids=("scope-a", "scope-a", "scope-b"),
+        topic_memory_hits=(),
+        experience_hits=(),
+    )
+    unscoped = build_recall_candidates(
+        memory_hits=(fts_first, deep_vector, ref_vector),
+        topic_memory_hits=(),
+        experience_hits=(),
+    )
+
+    scoped_assessment = gate.assess(scoped, "alpha beta", policy, scope_has_content=True, families_expected=1)
+    unscoped_assessment = gate.assess(unscoped, "alpha beta", policy, scope_has_content=True, families_expected=1)
+
+    assert scoped_assessment.reason == REASON_WEAK_TOP_ONE
+    assert scoped_assessment.signals.top_score == pytest.approx(0.31)
+    assert unscoped_assessment.reason != REASON_WEAK_TOP_ONE
+    assert unscoped_assessment.signals.scored_families == 0
+
+
+def test_gate_lexical_and_family_skip_for_a_scope_without_vector_evidence() -> None:
+    """A Scope whose fused top is FTS-only contributes no scores; the verdict still uses the
+    candidates it admitted for counts and lexical overlap."""
+    policy = RecallSufficiencyPolicy(min_top_score=0.35, min_top_gap=0.02, min_lexical_overlap=0.5)
+    candidates = (
+        _scoped_memory_candidate("alpha beta", scope_id="scope-a", relevance=None),
+        _scoped_memory_candidate("alpha beta", scope_id="scope-b", relevance=0.8),
+        _scoped_memory_candidate("alpha beta", scope_id="scope-b", relevance=0.5),
+    )
+    assessment = RecallSufficiencyGate().assess(
+        candidates,
+        "alpha beta",
+        policy,
+        scope_has_content=True,
+        families_expected=1,
+    )
+    assert assessment.sufficient is True
+    assert assessment.signals.candidate_count == 3
+    assert assessment.signals.top_score == pytest.approx(0.8)
+
+
 def test_gate_reports_weak_lexical_when_the_best_candidate_misses_query_terms() -> None:
     policy = RecallSufficiencyPolicy(min_top_score=0.35, min_top_gap=0.02, min_lexical_overlap=0.5)
-    candidates = (_topic_candidate(1.0), _topic_candidate(0.5, artifact_id="topic-2"))
+    candidates = (
+        _topic_candidate(1.0, relevance=0.8),
+        _topic_candidate(0.5, artifact_id="topic-2", relevance=0.5),
+    )
     assessment = RecallSufficiencyGate().assess(
         candidates,
         "alpha beta gamma delta",
@@ -318,7 +459,10 @@ def test_gate_reports_weak_lexical_when_the_best_candidate_misses_query_terms() 
 def test_gate_reports_sufficient_when_every_signal_passes() -> None:
     policy = RecallSufficiencyPolicy()
     text = "alpha beta gamma delta"
-    candidates = (_topic_candidate(1.0, text=text), _topic_candidate(0.5, artifact_id="topic-2", text=text))
+    candidates = (
+        _topic_candidate(1.0, text=text, relevance=0.8),
+        _topic_candidate(0.5, artifact_id="topic-2", text=text, relevance=0.5),
+    )
     assessment = RecallSufficiencyGate().assess(
         candidates,
         text,
@@ -440,10 +584,10 @@ def test_experience_only_candidates_never_expose_a_fabricated_score() -> None:
     assert assessment.reason != REASON_WEAK_TOP_ONE
 
 
-def test_topic_candidates_use_their_normalized_relevance_as_top_score() -> None:
+def test_topic_candidates_use_vector_relevance_as_top_score() -> None:
     candidates = build_recall_candidates(
         memory_hits=(),
-        topic_memory_hits=(_topic_hit(score=42.0),),
+        topic_memory_hits=(_topic_hit(score=42.0, relevance=0.78),),
         experience_hits=(),
     )
     signals = (
@@ -458,7 +602,77 @@ def test_topic_candidates_use_their_normalized_relevance_as_top_score() -> None:
         .signals
     )
     assert signals.scored_families == 1
-    assert signals.top_score == pytest.approx(0.42)
+    assert candidates[0].score == pytest.approx(0.42)
+    assert signals.top_score == pytest.approx(0.78)
+
+
+def test_gate_thresholds_use_cosine_relevance_independently_of_fused_rank() -> None:
+    policy = RecallSufficiencyPolicy(min_candidates=2, min_top_score=0.35, min_top_gap=0.02)
+    strong_rank_weak_cosine = (
+        _topic_candidate(1.0, text="alpha beta", relevance=0.3),
+        _topic_candidate(0.5, artifact_id="topic-2", text="alpha beta", relevance=0.1),
+    )
+    weak_rank_strong_cosine = (
+        _topic_candidate(0.01, text="alpha beta", relevance=0.8),
+        _topic_candidate(0.005, artifact_id="topic-2", text="alpha beta", relevance=0.5),
+    )
+    flat_cosine = (
+        _topic_candidate(1.0, text="alpha beta", relevance=0.8),
+        _topic_candidate(0.5, artifact_id="topic-2", text="alpha beta", relevance=0.8),
+    )
+    gate = RecallSufficiencyGate()
+    assert gate.assess(strong_rank_weak_cosine, "alpha beta", policy).reason == REASON_WEAK_TOP_ONE
+    assert gate.assess(weak_rank_strong_cosine, "alpha beta", policy).reason == REASON_SUFFICIENT
+    assert gate.assess(flat_cosine, "alpha beta", policy).reason == REASON_SUFFICIENT
+
+
+def test_lower_floor_candidates_cannot_manufacture_a_top_gap() -> None:
+    policy = RecallSufficiencyPolicy(min_top_score=0.35, min_top_gap=0.02)
+    baseline = (
+        _topic_candidate(1.0, text="alpha beta", relevance=0.4),
+        _topic_candidate(0.9, artifact_id="topic-2", text="alpha beta", relevance=0.39),
+    )
+    expanded = (*baseline, _topic_candidate(0.5, artifact_id="topic-3", text="alpha beta", relevance=0.15))
+    gate = RecallSufficiencyGate()
+    before = gate.assess(baseline, "alpha beta", policy)
+    after = gate.assess(expanded, "alpha beta", policy)
+    assert before.reason == after.reason == REASON_WEAK_TOP_ONE
+    assert after.signals.top_gap == pytest.approx(before.signals.top_gap)
+
+
+@pytest.mark.parametrize("fts_competitor", [False, True], ids=["single-candidate", "fts-competitor"])
+def test_one_scored_candidate_skips_gap_even_with_fts_competitors(fts_competitor: bool) -> None:
+    candidates = [_topic_candidate(1.0, text="alpha beta", relevance=0.5)]
+    if fts_competitor:
+        candidates.append(_topic_candidate(0.9, artifact_id="topic-2", text="alpha beta"))
+    assessment = RecallSufficiencyGate().assess(
+        candidates, "alpha beta", RecallSufficiencyPolicy(min_candidates=len(candidates))
+    )
+    assert assessment.reason == REASON_SUFFICIENT
+    assert assessment.signals.scored_families == 1
+    assert assessment.signals.gap_families == 0
+
+
+def test_fts_first_family_skips_score_threshold_despite_lower_vector_hit() -> None:
+    candidates = (
+        _topic_candidate(1.0, text="alpha beta"),
+        _topic_candidate(0.9, artifact_id="topic-2", text="alpha beta", relevance=0.31),
+    )
+    assessment = RecallSufficiencyGate().assess(candidates, "alpha beta", RecallSufficiencyPolicy())
+    assert assessment.reason == REASON_SUFFICIENT
+    assert assessment.signals.scored_families == 0
+
+
+def test_fts_only_candidates_skip_relevance_thresholds() -> None:
+    candidates = build_recall_candidates(
+        memory_hits=(_memory_hit(score=1 / 61, matched_by=("fts",)),),
+        topic_memory_hits=(_topic_hit(score=100.0, artifact_id="topic-2", title="alpha", summary="beta"),),
+        experience_hits=(),
+    )
+    assessment = RecallSufficiencyGate().assess(candidates, "alpha beta", RecallSufficiencyPolicy())
+    assert assessment.reason == REASON_SUFFICIENT
+    assert assessment.signals.scored_families == 0
+    assert assessment.signals.gap_families == 0
 
 
 def test_memory_single_channel_top_rank_normalizes_to_one() -> None:
@@ -477,6 +691,22 @@ def test_memory_two_channel_hit_normalizes_against_its_wider_upper_bound() -> No
         experience_hits=(),
     )
     assert candidates[0].score == pytest.approx(0.5)
+
+
+def test_memory_vector_relevance_reaches_gate_without_changing_rank_score() -> None:
+    hits = (
+        _memory_hit(score=2 / 61, matched_by=("fts", "vector"), text="alpha beta").model_copy(
+            update={"relevance": 0.3}
+        ),
+        _memory_hit(score=1 / 62, matched_by=("vector",), text="alpha beta").model_copy(
+            update={"entry_id": "other", "relevance": 0.1}
+        ),
+    )
+    candidates = build_recall_candidates(memory_hits=hits, topic_memory_hits=(), experience_hits=())
+    assessment = RecallSufficiencyGate().assess(candidates, "alpha beta", RecallSufficiencyPolicy())
+    assert candidates[0].score == pytest.approx(1.0)
+    assert assessment.signals.top_score == pytest.approx(0.3)
+    assert assessment.reason == REASON_WEAK_TOP_ONE
 
 
 # ── lexical_overlap semantics ───────────────────────────────────────────────────────────────
@@ -616,7 +846,7 @@ def test_effort_rounds_is_one_plus_the_committed_expansions() -> None:
     for effort in (none, one, two):
         assert effort.rounds == 1 + len(effort.expansion_actions)
         assert len(effort.candidates_by_round) == effort.rounds
-        assert effort.policy == POLICY_ID
+        assert effort.policy == "powercontext.recall-gate.v2"
 
 
 def test_effort_folds_the_builder_omission_counts_and_keeps_their_sum() -> None:
