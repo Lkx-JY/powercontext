@@ -857,19 +857,27 @@ class ScopedContextApplication:
 
     async def _prepare(self, request: PrepareContextRequest, scope: ScopeDescriptor, /) -> PreparedContext:
         build, effort = await self._prepare_build(request, scope)
-        if effort is not None and self._runtime._recall_effort_sink is not None:
+        if effort is not None:
             try:
-                await self._runtime._recall_effort_sink(effort)
+                # An explicit sink replaces the relational recorder. Both receive
+                # the same final trace, and one preparation is never recorded twice.
+                if self._runtime._recall_effort_sink is not None:
+                    await self._runtime._recall_effort_sink(effort)
+                elif self._runtime._statistics_service is not None:
+                    await self._runtime._statistics(self.scope_id).record_recall_effort(
+                        effort,
+                        self._runtime._clock().astimezone(UTC).date(),
+                    )
             except Exception as error:
                 log_safely(
                     logger,
                     logging.ERROR,
                     "Recall effort sink failed",
-                    exc_info=error,
                     extra={
                         "event": "context.recall_gate.sink_failed",
                         "outcome": "failure",
                         "unit": "context",
+                        "error_type": type(error).__name__,
                     },
                 )
         if self._runtime._recall_token_estimator is not None:
