@@ -16,8 +16,8 @@ The design follows [RFC #1771](https://github.com/oceanbase/powercontext/pull/17
 
 The full Server framework registers two installed-release sources for the PowerContext 1.4.1 target (stored compatibility IDs shown below):
 
-- **1.3.0:** `s1300 → s1400 → s1401 → s1402`.
-- **1.4.0:** `r1400 → s1400 → s1401 → s1402` through a separate frozen source bridge.
+- **1.3.0:** `s1300 → s1400 → s1401 → s1402 → v1_4_1_004`.
+- **1.4.0:** `r1400 → s1400 → s1401 → s1402 → v1_4_1_004` through a separate frozen source bridge.
 
 Application release numbers and schema revisions are distinct. The 1.4.0 release is not the `s1400` checkpoint:
 its existing Candidate schema is current, but its Topic attempt storage still needs the registered bridge.
@@ -48,6 +48,8 @@ Revision `s1401` registers `pc_memory_artifact_archive` in the managed target sc
 Revision `s1402` registers portable restore receipts and preserves microsecond precision for the portable Artifact,
 Profile, Topic publication, and tag timestamps on MySQL-compatible backends. These schema changes run through explicit
 maintenance for existing managed storage. Runtime startup does not add the receipt table or alter timestamp columns.
+
+Revision `v1_4_1_004` registers `pc_access_owner_recovery` for durable Artifact and Candidate ownership intents. Both installed-release source paths and vector profiles include this table. Existing managed databases require explicit maintenance; fresh databases create the registered empty table. Pending intents retain their original deployment, principal and idempotency identity across Server restarts. Earlier revision resources and checksums remain unchanged. Unregistered database layouts are rejected rather than adopted from a table name alone. This registration does not establish installed-release or external-Provider upgrade acceptance.
 
 An interrupted [portable restore](portable-archive.md) keeps normal startup and workers blocked until its projections
 are complete. Retry `powercontext archive restore <bundle> --yes` with the same validated bundle. Only this explicit
