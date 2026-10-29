@@ -20,7 +20,7 @@ import threading
 import httpx
 import pytest
 
-from tests.e2e.test_minimax_host import ModelGateway
+from tests.e2e.test_minimax_host import ModelGateway, _objects, _tool_listing
 
 
 @pytest.fixture
@@ -74,11 +74,40 @@ def test_gateway_invokes_the_discovered_scope_tool(gateway, discovery, name):
 @pytest.mark.parametrize("discovery", ["direct", "search"])
 @pytest.mark.parametrize(
     "names",
-    [["unrelated_tool"], ["mcp__powercontext__list_scopes", "mcp__powercontext_2__list_scopes"]],
-    ids=["missing", "ambiguous"],
+    [[], ["unrelated_tool"], ["mcp__powercontext__list_scopes", "mcp__powercontext_2__list_scopes"]],
+    ids=["empty", "missing", "ambiguous"],
 )
 def test_gateway_rejects_missing_or_ambiguous_scope_tools(gateway, discovery, names):
     response = model_response(gateway, names, discovery=discovery)
     assert "tool_calls" not in response["message"]
+    assert response["message"]["content"] == "MINIMAX_MCP_ACCEPTANCE_FAILED"
     assert not gateway.invoked_tools
     assert gateway.errors and "Expected one isolated list_scopes tool" in gateway.errors[0]
+
+
+@pytest.mark.parametrize("prefix", ['{"message": "Scopes listed"}', "Scopes listed"])
+def test_scope_evidence_is_read_from_an_appended_structured_content_block(prefix):
+    scope = {"scope_id": "seeded-scope", "title": "Seeded scope"}
+    content = prefix + "\n[MCP structured content]\n" + json.dumps({"scopes": [scope]})
+    assert scope in list(_objects(content))
+
+
+def test_provider_negotiation_without_a_tool_catalog_is_not_an_mcp_discovery_failure(gateway):
+    with httpx.Client(trust_env=False, timeout=5) as client:
+        response = client.post(
+            f"http://127.0.0.1:{gateway.server_port}/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "Hi"}]},
+        )
+    assert response.status_code == 200
+    assert not gateway.errors
+    assert not gateway.invoked_tools
+
+
+@pytest.mark.parametrize("encoding", ["json", "sse", "sse-crlf"])
+def test_native_tools_list_evidence_reads_streamable_http_response_encodings(encoding):
+    document = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "list_scopes"}]}})
+    if encoding != "json":
+        document = "event: message\ndata: " + document + "\n\n"
+    if encoding == "sse-crlf":
+        document = document.replace("\n", "\r\n")
+    assert _tool_listing(document.encode()) == ["list_scopes"]

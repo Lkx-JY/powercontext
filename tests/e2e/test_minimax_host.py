@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -30,6 +31,8 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
+from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 from pydantic import SecretStr
 from typer.testing import CliRunner
 
@@ -45,8 +48,92 @@ pytestmark = pytest.mark.skipif(
 ROOT = Path(__file__).parents[2]
 
 
+def _tool_listing(body):
+    """Read tool names from JSON or streamable HTTP SSE, excluding tool results."""
+    text = body.decode("utf-8").replace("\r\n", "\n")
+    documents = [text]
+    if text.startswith(("event:", "data:", ":")):
+        documents = [
+            "\n".join(line[5:].lstrip(" ") for line in event.splitlines() if line.startswith("data:"))
+            for event in text.split("\n\n")
+        ]
+    for document in documents:
+        try:
+            value = json.loads(document)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("result"), dict):
+            tools = value["result"].get("tools")
+            if isinstance(tools, list):
+                return [tool["name"] for tool in tools]
+    return None
+
+
+class MCPTrace:
+    """Retain protocol timing without recording headers, arguments, or results."""
+
+    def __init__(self, app, events):
+        self.app = app
+        self.events = events
+
+    @staticmethod
+    def record_request(event, body):
+        try:
+            document = json.loads(body)
+        except ValueError:
+            return
+        event["rpc_method"] = document.get("method")
+        if document.get("method") == "tools/call":
+            event["tool_name"] = document.get("params", {}).get("name")
+
+    @staticmethod
+    def finish_response(event, response):
+        event["response_finished_at_ms"] = round(time.monotonic() * 1000, 2)
+        if event.get("rpc_method") == "tools/list":
+            names = _tool_listing(response)
+            if names is not None:
+                event["response_tool_count"] = len(names)
+                event["response_has_list_scopes"] = "list_scopes" in names
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].startswith("/mcp"):
+            return await self.app(scope, receive, send)
+        started = time.monotonic()
+        event = {"http_method": scope["method"], "started_at_ms": round(started * 1000, 2)}
+        self.events.append(event)
+        body = bytearray()
+        response = bytearray()
+
+        async def observed_receive():
+            message = await receive()
+            if message["type"] == "http.request":
+                body.extend(message.get("body", b""))
+                if not message.get("more_body", False):
+                    self.record_request(event, body)
+            return message
+
+        async def observed_send(message):
+            if message["type"] == "http.response.start":
+                event["http_status"] = message["status"]
+            if message["type"] == "http.response.body" and event.get("rpc_method") == "tools/list":
+                response.extend(message.get("body", b""))
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                self.finish_response(event, response)
+
+        try:
+            await self.app(scope, observed_receive, observed_send)
+        finally:
+            event["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+
+
 @pytest.fixture
-def host(tmp_path, monkeypatch, request):
+def mcp_trace():
+    return []
+
+
+@pytest.fixture
+def host(tmp_path, monkeypatch, request, mcp_trace):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
@@ -69,6 +156,7 @@ def host(tmp_path, monkeypatch, request):
         ),
         scheduler_path=tmp_path / "scheduler",
     )
+    app.add_middleware(MCPTrace, events=mcp_trace)
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -236,18 +324,20 @@ def _objects(value):
         for child in value:
             yield from _objects(child)
     elif isinstance(value, str):
-        try:
-            # MiniMax can append another MCP text block after the first JSON value.
-            decoded, _ = json.JSONDecoder().raw_decode(value.lstrip())
-        except ValueError:
-            return
-        yield from _objects(decoded)
+        # Native results can contain prose or JSON followed by structured content.
+        for block in value.split("\n[MCP structured content]\n"):
+            try:
+                decoded, _ = json.JSONDecoder().raw_decode(block.lstrip())
+            except ValueError:
+                continue
+            yield from _objects(decoded)
 
 
 class ModelGateway(ThreadingHTTPServer):
     def __init__(self):
         super().__init__(("127.0.0.1", 0), ModelHandler)
         self.requests: list[dict[str, Any]] = []
+        self.request_observations: list[dict[str, Any]] = []
         self.invoked_tools: list[str] = []
         self.scope_call_ids: set[str] = set()
         self.errors: list[str] = []
@@ -272,6 +362,11 @@ class ModelHandler(BaseHTTPRequestHandler):
         if "messages" not in body:
             self.send_error(404, "Only OpenAI chat completions are supported")
             return
+        self.server.request_observations.append({
+            "received_at_ms": round(time.monotonic() * 1000, 2),
+            "has_tool_catalog": "tools" in body,
+            "tools": [tool["function"]["name"] for tool in body.get("tools", [])],
+        })
         self.server.requests.append(body)
         messages = body["messages"]
         tool_results = [message for message in messages if message["role"] == "tool"]
@@ -291,13 +386,15 @@ class ModelHandler(BaseHTTPRequestHandler):
                 arguments = {"tool_name": match, "arguments": {"limit": 10}}
                 self.server.invoked_tools.append(match)
                 self.server.scope_call_ids.add(call_id)
-        elif not tool_results and names:
+        elif not tool_results and "tools" in body:
             selected = self.server.scope_tool(names)
             arguments = {"limit": 10}
             if selected:
                 self.server.invoked_tools.append(selected)
                 self.server.scope_call_ids.add(call_id)
-        delta: dict[str, Any] = {"content": "MINIMAX_MCP_ACCEPTANCE_OK"}
+        delta: dict[str, Any] = {
+            "content": "MINIMAX_MCP_ACCEPTANCE_FAILED" if self.server.errors else "MINIMAX_MCP_ACCEPTANCE_OK"
+        }
         finish = "stop"
         if selected:
             delta = {
@@ -356,7 +453,8 @@ class ModelHandler(BaseHTTPRequestHandler):
 
 
 @pytest.mark.parametrize("plugin_connection", [False, True], ids=["private-mcp", "plugin-mcp"])
-def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plugin_connection):
+@pytest.mark.parametrize("startup", ["cold", "preflight"])
+def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plugin_connection, startup, mcp_trace):
     root, endpoint = host
     data = root / "mcp-tool"
     result = invoke(
@@ -421,7 +519,22 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
         )
         assert response.status_code == 201, response.text
         scope_id = response.json()["scope_id"]
+
+    async def discover_server_tools():
+        transport = StreamableHttpTransport(bundle_entry["url"], headers=bundle_entry["headers"])
+        async with Client(transport, timeout=10, init_timeout=10) as client:
+            return sorted(tool.name for tool in await client.list_tools())
+
+    preflight: dict[str, Any] = {"performed": startup == "preflight"}
+    if startup == "preflight":
+        started = time.monotonic()
+        server_tools = asyncio.run(discover_server_tools())
+        preflight.update(tools=server_tools, elapsed_ms=round((time.monotonic() - started) * 1000, 2))
+        assert "list_scopes" in server_tools, preflight
+    diagnostics = root / "native-diagnostics"
+    evidence = root / "acceptance-evidence.json"
     gateway = ModelGateway()
+    scope_result_matched = False
     thread = threading.Thread(target=gateway.serve_forever, daemon=True)
     thread.start()
     try:
@@ -447,6 +560,7 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
             check=False,
         )
         assert added.returncode == 0, added.stderr
+        mcp_trace.clear()
         executed = subprocess.run(
             [
                 COMMAND,
@@ -462,6 +576,8 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
                 "json",
                 "--cwd",
                 str(root),
+                "--diagnostics-dir",
+                str(diagnostics),
             ],
             env=environment,
             capture_output=True,
@@ -470,18 +586,30 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
             check=False,
         )
         assert executed.returncode == 0, executed.stdout + executed.stderr
-        assert not gateway.errors, gateway.errors
+        assert not gateway.errors, {
+            "errors": gateway.errors,
+            "evidence": str(evidence),
+            "native_stderr": executed.stderr,
+        }
         observed = [
             message
             for request in gateway.requests
             for message in request.get("messages", [])
             if message["role"] == "tool" and message.get("tool_call_id") in gateway.scope_call_ids
         ]
-        assert any(
+        scope_result_matched = any(
             item.get("scope_id") == scope_id and item.get("title") == marker
             for message in observed
             for item in _objects(message["content"])
-        ), {"stdout": executed.stdout, "stderr": executed.stderr, "tools": gateway.invoked_tools, "results": observed}
+        )
+        assert scope_result_matched, {
+            "stdout": executed.stdout,
+            "stderr": executed.stderr,
+            "tools": gateway.invoked_tools,
+            "results": observed,
+            "evidence": str(evidence),
+        }
+        assert any(event.get("response_has_list_scopes") is True for event in mcp_trace), str(evidence)
         assert len(set(gateway.invoked_tools)) == 1, gateway.invoked_tools
         if plugin_connection:
             assert any("powercontext-project-context" in json.dumps(request) for request in gateway.requests)
@@ -489,6 +617,25 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
         gateway.shutdown()
         gateway.server_close()
         thread.join(timeout=5)
+        evidence.write_text(
+            json.dumps(
+                {
+                    "route": "plugin-mcp" if plugin_connection else "private-mcp",
+                    "startup": startup,
+                    "server_preflight": preflight,
+                    "native_mcp_requests": mcp_trace,
+                    "model_requests": gateway.request_observations,
+                    "invoked_tools": gateway.invoked_tools,
+                    "scope_result_matched": scope_result_matched,
+                    "errors": gateway.errors,
+                    "native_diagnostics": str(diagnostics),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
 
 def test_real_doctor_does_not_initialize_an_uninstalled_native_target(host):

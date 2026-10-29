@@ -14,7 +14,7 @@ PowerContext 安装 MiniMax 原生插件，包含 `powercontext-project-context`
 
 需要 Python 3.11+、PowerContext CLI 和运行中的 PowerContext Server。CLI、Server 和插件应来自同一仓库 revision。使用发布版本时，通过 `--ref` 指定与 Server 匹配的仓库 tag；插件 manifest 版本独立于 Python 包版本。远程 ref 沿用现有分支和标签约定；安装指定 commit 时，先在本地检出，再使用 `--source`。
 
-原生验收使用官方 npm CLI `@minimax-ai/code@0.6.9`，环境为 Linux x86_64、Node.js 22.23.3。该 CLI 验收不代表桌面端发现或其他平台已通过验证。具体命令和证据边界见[验收记录](https://github.com/oceanbase/powercontext/blob/master/integrations/minimax/acceptance.md)。
+原生测试使用官方 npm CLI `@minimax-ai/code@0.6.9`，环境为 Linux x86_64、Node.js 22.23.3。仅插件 MCP 路径的工具注入尚未通过可靠性验收：宿主可能报告插件已连接，但未向模型暴露工具。setup 或 doctor 通过不能排除这一限制。桌面端发现和其他平台需要单独验收。具体命令、诊断产物和证据边界见[验收记录](https://github.com/oceanbase/powercontext/blob/master/integrations/minimax/acceptance.md)。
 
 ## 安装与选择目标
 

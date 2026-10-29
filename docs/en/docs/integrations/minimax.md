@@ -14,7 +14,7 @@ PowerContext installs a native MiniMax plugin containing the `powercontext-proje
 
 Use Python 3.11+, the PowerContext CLI, and a running PowerContext Server. Install the CLI, Server, and plugin from the same repository revision. For a pinned release, use its matching repository tag with `--ref`; the plugin manifest version is independent of the Python package version. Remote refs follow the existing branch/tag convention. To install a specific commit, check it out locally and use `--source`.
 
-Native qualification uses the official npm CLI `@minimax-ai/code@0.6.9` on Linux x86_64 with Node.js 22.23.3. Desktop discovery and other platforms are not qualified by that CLI run. See the [acceptance record](https://github.com/oceanbase/powercontext/blob/master/integrations/minimax/acceptance.md) for the commands and evidence boundary.
+Native tests use the official npm CLI `@minimax-ai/code@0.6.9` on Linux x86_64 with Node.js 22.23.3. Plugin-only MCP tool injection is not reliably qualified: the host can report a connected plugin without exposing its tools to the model. A passing setup or doctor does not resolve this limitation. Desktop discovery and other platforms require separate qualification. See the [acceptance record](https://github.com/oceanbase/powercontext/blob/master/integrations/minimax/acceptance.md) for commands, diagnostic artifacts, and the evidence boundary.
 
 ## Install and select a target
 
