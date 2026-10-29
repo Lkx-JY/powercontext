@@ -69,7 +69,7 @@ pnpm --dir desktop desktop:dev
 ## 连接已有 Server
 
 1. 在连接页添加名称和 Server 地址。HTTP 只允许字面 loopback 地址，其他地址必须 HTTPS；可保留反向代理路径前缀。
-2. 明确选择未认证本机服务或 Bearer。凭据可保存到 Windows 凭据管理器或仅本次会话；地址或信任变化后需要重新配置凭据。自定义 CA 不会关闭证书校验。
+2. 明确选择未认证本机服务或 Bearer。凭据可保存到 Windows 凭据管理器、macOS Keychain 或 Linux Secret Service（GNOME Keyring/KWallet）；也可以明确选择仅本次会话。如果系统凭据库不可用或被锁定，保存会失败，秘密不会写入连接配置 JSON；此时只能选择仅本次会话或取消。地址或信任变化后需要重新配置凭据。自定义 CA 不会关闭证书校验。
 3. 核对部署版本后选择已验证兼容配置，具体构建摘要和范围见 [验证说明](VALIDATION.md)。选择配置不能证明远端二进制身份。
 4. 保存后点击“使用此连接”。查看其他配置不会自动切换当前连接。分别查看可达性、就绪、身份和能力，不把其中一项当作资源授权。
 5. 通过顶部 Scope 下拉按钮按标题分页查找范围，每页最多 50 项。选择结果后更新当前范围并关闭弹窗；不创建范围或修改 Agent 绑定。修改查询取消旧请求，切换连接或身份后旧结果失效。
@@ -93,7 +93,7 @@ pnpm --dir desktop desktop:dev
 - OpenAPI 自动派生的 TypeScript schema 和十一项 operation 映射，包含契约摘要及漂移检查。
 - `desktop/openapitools.json` 固定 OpenAPI Generator CLI 版本，Rust 模板位于 `desktop/scripts/openapi-generator/rust/`。修改 OpenAPI 合同或模板后，在仓库根目录执行 `pnpm --dir desktop generate`，不要手动编辑生成的 `src-tauri/src/transport/wire.rs`；CI 通过 `pnpm --dir desktop generate:check` 检查生成结果是否漂移。
 - Rust 自动派生的 IPC 类型与安全错误；凭据只写请求必须显式选择持久化或仅会话，成功回执只含存储模式，不含秘密或凭据标识。
-- Windows Credential Manager 原生适配器；保存失败直接报错，只有显式选择才采用仅会话内存。秘密类型不支持序列化，不实现 Debug。
+- Windows Credential Manager、macOS Keychain 和 Linux Secret Service 原生适配器；保存失败直接报错，只有显式选择才采用仅会话内存，绝不把秘密降级写入连接配置。秘密类型不支持序列化，不实现 Debug。
 - 使用系统证书信任的原生 HTTPS；可为单个客户端添加显式 CA，继续校验主机名。
 - HTTP 仅允许 loopback，拒绝地址中的用户信息、查询、片段、反斜杠及路径逃逸；不继承代理、不跟随重定向。
 - 连接超时 5 秒、完整请求超时 15 秒、响应上限 1 MiB、每个客户端最多 4 个并发读取；超限明确失败。
