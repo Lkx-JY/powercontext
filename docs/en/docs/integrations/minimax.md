@@ -16,7 +16,7 @@ Use Python 3.11+, the PowerContext CLI, and a running PowerContext Server. Insta
 
 Native tests cover the official npm CLI `@minimax-ai/code` versions 0.6.9 and 0.7.2 on Linux x86_64 with Node.js 22.23.3. Plugin-only MCP tool injection is not reliably qualified in either version: the host can report a connected plugin without making its tools available to the model, including through `tool_search`. Upgrading to 0.7.2, or passing setup or doctor, does not resolve this limitation. Desktop discovery and other platforms require separate qualification. See the [acceptance record](https://github.com/oceanbase/powercontext/blob/master/integrations/minimax/acceptance.md) for commands, diagnostic artifacts, and the evidence boundary.
 
-The verified 0.7.2 installation flow keeps the private `powercontext` MCP entry created by setup enabled together with the complete plugin. This provides MCP tools through the private connection and retains the plugin Skill. Removing or disabling the private entry relies on the unqualified plugin-only path. Setup preserves an existing disabled preference; explicitly enable that private entry in `mcp.json` if you choose to use this verified path, then run `powercontext config agent minimax` and restart MiniMax.
+The verified official 0.7.2 installation flow keeps the private `powercontext` MCP entry created by setup enabled together with the complete plugin. This provides MCP tools through the private connection and retains the plugin Skill. Removing or disabling the private entry in the official npm versions relies on the unqualified plugin-only path. Setup preserves an existing disabled preference; explicitly enable that private entry in `mcp.json` if you choose to use this verified path, then run `powercontext config agent minimax` and restart MiniMax.
 
 ## Install and select a target
 
@@ -45,6 +45,25 @@ Interactive `powercontext setup` includes MiniMax. Multiple agents share the sam
 powercontext setup codex minimax --source /path/to/powercontext --json
 powercontext doctor minimax --json
 ```
+
+## Run the plugin-only source fix
+
+The [MiniMax readiness fix](https://github.com/hidb4ai/minimax-code/commit/0ea69bd04c90cc151cae2eff9d5b7b4465d3c7dc) waits for plugin MCP discovery and inventory publication before capturing a turn's tools. The Linux source build passes plugin-only invocation in the affected environment, including 6-second and 11-second inventory delays. This is a pinned community source build based on MiniMax's public 0.7.2 synchronization branch; the official npm package does not contain this patch. [Upstream issue #570](https://github.com/MiniMax-AI/minimax-code/issues/570) tracks adoption.
+
+Use Node.js 22.23.3 and the repository's pinned pnpm version to build the launcher:
+
+```bash
+git clone --branch fix/plugin-mcp-turn-readiness-0.7.2 https://github.com/hidb4ai/minimax-code.git
+cd minimax-code
+git checkout 0ea69bd04c90cc151cae2eff9d5b7b4465d3c7dc
+pnpm install --frozen-lockfile
+pnpm build
+powercontext setup minimax --source /path/to/powercontext \
+  --minimax-data-dir "/path/to/MiniMax data" \
+  --minimax-command "$PWD/dist/cli.js"
+```
+
+Launch this same `dist/cli.js` with `MINIMAX_DATA_DIR` set to the selected data directory. Setup saves that launcher for subsequent configuration and diagnostics. Keep the plugin enabled and its URL/credentials synchronized before choosing to disable the private entry for plugin-only execution. Returning to an unpatched launcher restores the official-version qualification limit. See the [acceptance record](https://github.com/oceanbase/powercontext/blob/master/integrations/minimax/acceptance.md) for the source revisions and validation boundary.
 
 ## Configure a protected or remote Server
 

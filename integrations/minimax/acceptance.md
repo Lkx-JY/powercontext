@@ -2,7 +2,7 @@
 
 ## Environment
 
-- Date: 2026-10-30.
+- Date: 2026-10-31.
 - Platform: Linux x86_64.
 - Node.js: 22.23.3.
 - Host: official npm `@minimax-ai/code@0.6.9` and `@minimax-ai/code@0.7.2`, installed into separate isolated temporary prefixes.
@@ -25,7 +25,7 @@ The tests start a real PowerContext HTTP Server and invoke the public setup/doct
 
 The 2026-10-29 Linux reference run passed eleven scenarios against the real CLI 0.6.9: explicit destination, `MINIMAX_DATA_DIR`, `MAVIS_DATA_DIR`, invalid-package/authentication diagnostics, private and plugin MCP calls under both cold and preflight startup, disabled private overrides with and without Authorization, and diagnosis of an uninstalled target. They verify repeated setup, the native loader's enabled local plugin record, required Skill/MCP counts, saved-target reuse, native disablement and its preservation during setup, omission of an invalid native manifest, and rejection of a wrong private Bearer header by the real Server.
 
-**Plugin-only tool injection remains unqualified for reliable use.** The affected Linux environment reproduces the failure with both official CLI 0.6.9 and 0.7.2 on Node.js 22.23.3: a connected, enabled plugin's PowerContext tools are unavailable to the model. The private-only cases pass in that environment. Local passing runs do not resolve this failure, and this record does not establish reliable dual-route support.
+**Plugin-only tool injection in the unmodified official npm releases remains unqualified for reliable use.** The affected Linux environment reproduces the failure with both official CLI 0.6.9 and 0.7.2 on Node.js 22.23.3: a connected, enabled plugin's PowerContext tools are unavailable to the model. The private-only cases pass in that environment. Local passing runs do not resolve this failure, and this record does not establish reliable dual-route support.
 
 Native discovery runs in a disposable profile containing the installed package and its enablement state. The real MiniMax profile is unchanged byte-for-byte across doctor, both before and after disabling the plugin through the real CLI. Diagnosing an uninstalled target does not create that target. Only the selected plugin's enablement is carried into the diagnostic runtime; real sessions and provider configuration are not imported.
 
@@ -82,6 +82,23 @@ CLI 0.6.9 exposed 81 tools in the private cases and only 18 built-ins in the plu
 The default installation with both the private MCP entry and the complete plugin enabled passed on official 0.7.2 under both cold and preflight startup. Each case discovered and invoked `mcp__powercontext__list_scopes` through `tool_search` and `mcp_invoke`, returned the seeded Scope ID and title associated with that tool call, and delivered `powercontext-project-context` to the model. This verifies the installed configuration and its private MCP fallback; it does not establish which connection would be selected after a future host fix or qualify the isolated plugin route.
 
 The shipped 0.7.2 runtime captures and retains a turn's capabilities before plugin discovery has necessarily published its inventory. A later successful inventory response does not replace that turn's captured capabilities. Its readiness method waits for initialization, cached restoration and directory watching; it does not wait for the background discovery/publication operation. Startup hooks also run after capability capture, so an independent MCP probe or a fixed delay in a hook does not establish a readiness barrier for that turn. The released host needs a discovery/publication barrier before final capability capture. PowerContext retains the failing isolated-route assertions; it does not patch an installed host, substitute the private route for the plugin test, or count an empty search result as acceptance.
+
+## Source fix in the affected environment
+
+The MiniMax source fix is available as [main-based commit `50ee352`](https://github.com/hidb4ai/minimax-code/commit/50ee352f15c5c3113b77f5020f03b32bcee2c3b8) and [0.7.2 source commit `0ea69bd`](https://github.com/hidb4ai/minimax-code/commit/0ea69bd04c90cc151cae2eff9d5b7b4465d3c7dc). Their respective upstream bases are `50448abe3c753391cbfb24df835518d844504862` and the public `feat/sync-0-7-2` branch at `0bd2c5a3f425a4e5fdafdf2eb954548e4d20fdfd`. These are community source builds, distinct from the official npm packages. [Upstream issue #570](https://github.com/MiniMax-AI/minimax-code/issues/570) tracks the fix and its adoption.
+
+The fix waits during turn preparation for the current MCP discovery and its inventory publication, then rechecks the generation at synchronous capability capture. The MCP readiness wait has a 20-second bound and supports cancellation without cancelling shared discovery. A server whose failed inventory has been published retains MiniMax's existing fail-open behavior: healthy tools remain available, and retry timers do not block a turn. Read-only package discovery keeps its existing behavior.
+
+Validation on 2026-10-31 used the same affected Linux environment, Node.js 22.23.3, pnpm 9.12.0, and PowerContext `319e389d3d61bb800cf3d8d7541e9e4522e54f7f`:
+
+- The unmodified main source build (version 0.6.5) reproduced the cold plugin-only failure without injected delay. Its inventory contained 63 tools and completed in about 264 ms, but no Scope tool reached the model. The same baseline also failed with an 11-second inventory delay.
+- The main-based fixed build passed all six controlled-inference cases: private-only, plugin-only, and installed-default, each under cold and preflight startup. Every case returned the seeded Scope ID/title with the matching tool-call ID; the plugin and default cases delivered the Skill.
+- The 0.7.2 source fix passed the complete thirteen-case real-host suite, including installation targets, loader omission, authorization failure, preservation of disabled private entries, all six controlled-inference cases, and read-only diagnosis of an uninstalled target.
+- The 0.7.2 source fix passed cold plugin-only runs with 6-second and 11-second delays applied to the real `tools/list` response during native execution. Recorded inventory durations were 6023 ms and 11013 ms. The private MCP entry remained absent, and the tool-result assertions were unchanged.
+- Eight new upstream regressions cover discovery and publication separately, waiter cancellation, a failed server alongside a healthy one, the readiness deadline, hot reload before capture, cached inventory with a retained older turn, and a Skill-only plugin. Seven fail on the unmodified source; all eight pass with the fix. The complete focused files pass on both source branches, including the existing Agent roster tests in 0.7.2.
+- The main-based commit passed `pnpm verify` with the full applicable Linux profile on clean committed source, including source export, lint, type checking, build, artifact and capability checks, Code SDK tests, CLI smoke, offline BYOK, and permissions policy. Windows and macOS sandbox gates were inapplicable; release-archive installation was not exercised. The 0.7.2 source build and its focused turn-capability file passed; the full upstream verifier was run on the main-based commit.
+
+The [integration guide](../../docs/en/docs/integrations/minimax.md#run-the-plugin-only-source-fix) explains how to build the pinned 0.7.2 source and select its launcher through the existing `--minimax-command` option. This validates plugin-only execution with that source fix; it does not establish that an unmodified official npm release contains the fix, or qualify other platforms and external model providers.
 
 ## Tool-discovery diagnostics
 

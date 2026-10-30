@@ -16,7 +16,7 @@ PowerContext 安装 MiniMax 原生插件，包含 `powercontext-project-context`
 
 原生测试覆盖官方 npm CLI `@minimax-ai/code` 的 0.6.9 和 0.7.2，环境为 Linux x86_64、Node.js 22.23.3。这两个版本的仅插件 MCP 路径均尚未通过可靠性验收：宿主可能报告插件已连接，但模型无法获取工具，包括通过 `tool_search` 发现工具。升级至 0.7.2，或 setup、doctor 通过，都不能排除这一限制。桌面端发现和其他平台需要单独验收。具体命令、诊断产物和证据边界见[验收记录](https://github.com/oceanbase/powercontext/blob/master/integrations/minimax/acceptance.md)。
 
-已验证的 0.7.2 安装流程同时保留 setup 创建的已启用私有 `powercontext` MCP 条目和完整插件：通过私有连接提供 MCP 工具，并保留插件 Skill。删除或禁用私有条目后，会依赖尚未通过验收的仅插件路径。setup 会保留既有禁用偏好；如果选择使用这条已验证路径，请在 `mcp.json` 中显式启用该私有条目，再运行 `powercontext config agent minimax` 并重启 MiniMax。
+已验证的官方 0.7.2 安装流程同时保留 setup 创建的已启用私有 `powercontext` MCP 条目和完整插件：通过私有连接提供 MCP 工具，并保留插件 Skill。在官方 npm 版本中删除或禁用私有条目后，会依赖尚未通过验收的仅插件路径。setup 会保留既有禁用偏好；如果选择使用这条已验证路径，请在 `mcp.json` 中显式启用该私有条目，再运行 `powercontext config agent minimax` 并重启 MiniMax。
 
 ## 安装与选择目标
 
@@ -45,6 +45,25 @@ powercontext setup minimax --source /path/to/powercontext \
 powercontext setup codex minimax --source /path/to/powercontext --json
 powercontext doctor minimax --json
 ```
+
+## 使用仅插件路径的源码修复
+
+[MiniMax 就绪性修复](https://github.com/hidb4ai/minimax-code/commit/0ea69bd04c90cc151cae2eff9d5b7b4465d3c7dc)会在捕获本轮工具前，等待插件 MCP 发现及工具清单发布完成。该 Linux 源码构建已在原失败环境通过仅插件路径调用，包括工具清单延迟 6 秒和 11 秒的场景。这是基于 MiniMax 公开 0.7.2 同步分支的固定社区源码构建；官方 npm 包尚未包含此补丁。上游接纳进度见[问题单 #570](https://github.com/MiniMax-AI/minimax-code/issues/570)。
+
+使用 Node.js 22.23.3 和仓库固定的 pnpm 版本构建启动器：
+
+```bash
+git clone --branch fix/plugin-mcp-turn-readiness-0.7.2 https://github.com/hidb4ai/minimax-code.git
+cd minimax-code
+git checkout 0ea69bd04c90cc151cae2eff9d5b7b4465d3c7dc
+pnpm install --frozen-lockfile
+pnpm build
+powercontext setup minimax --source /path/to/powercontext \
+  --minimax-data-dir "/path/to/MiniMax data" \
+  --minimax-command "$PWD/dist/cli.js"
+```
+
+启动同一个 `dist/cli.js`，并将 `MINIMAX_DATA_DIR` 设为所选数据目录。setup 会保存该启动器，供后续配置和诊断使用。选择禁用私有条目以运行仅插件路径前，应保持插件启用，并同步好 URL 和凭据。切回未修复的启动器后，仍受官方版本的验收限制。源码 revision 和验证范围见[验收记录](https://github.com/oceanbase/powercontext/blob/master/integrations/minimax/acceptance.md)。
 
 ## 配置受保护或远程 Server
 
