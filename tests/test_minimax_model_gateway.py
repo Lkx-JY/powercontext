@@ -24,8 +24,8 @@ from tests.e2e.test_minimax_host import ModelGateway, _objects, _tool_listing
 
 
 @pytest.fixture
-def gateway():
-    server = ModelGateway()
+def gateway(request):
+    server = ModelGateway(allow_multiple_scope_tools=getattr(request, "param", False))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -83,6 +83,35 @@ def test_gateway_rejects_missing_or_ambiguous_scope_tools(gateway, discovery, na
     assert response["message"]["content"] == "MINIMAX_MCP_ACCEPTANCE_FAILED"
     assert not gateway.invoked_tools
     assert gateway.errors and "Expected one isolated list_scopes tool" in gateway.errors[0]
+
+
+@pytest.mark.parametrize("gateway", [True], indirect=True)
+@pytest.mark.parametrize("discovery", ["direct", "search"])
+def test_installed_default_gateway_invokes_one_discovered_scope_tool(gateway, discovery):
+    names = ["mcp__powercontext__list_scopes", "mcp__powercontext_2__list_scopes"]
+    response = model_response(gateway, names, discovery=discovery)
+    call = response["message"]["tool_calls"][0]
+    arguments = json.loads(call["function"]["arguments"])
+    selected = arguments["tool_name"] if discovery == "search" else call["function"]["name"]
+    assert selected in names
+    assert response["finish_reason"] == "tool_calls"
+    assert arguments == (
+        {"tool_name": selected, "arguments": {"limit": 10}} if discovery == "search" else {"limit": 10}
+    )
+    assert gateway.invoked_tools == [selected]
+    assert call["id"] in gateway.scope_call_ids
+    assert not gateway.errors
+
+
+@pytest.mark.parametrize("gateway", [True], indirect=True)
+@pytest.mark.parametrize("discovery", ["direct", "search"])
+@pytest.mark.parametrize("names", [[], ["unrelated_tool"]], ids=["empty", "missing"])
+def test_installed_default_gateway_still_rejects_missing_scope_tools(gateway, discovery, names):
+    response = model_response(gateway, names, discovery=discovery)
+    assert "tool_calls" not in response["message"]
+    assert response["message"]["content"] == "MINIMAX_MCP_ACCEPTANCE_FAILED"
+    assert not gateway.invoked_tools
+    assert gateway.errors and "Expected at least one list_scopes tool" in gateway.errors[0]
 
 
 @pytest.mark.parametrize("prefix", ['{"message": "Scopes listed"}', "Scopes listed"])

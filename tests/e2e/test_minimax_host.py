@@ -255,8 +255,8 @@ def test_native_loader_omission_and_private_authorization_failure(host):
     private.write_text(json.dumps(config))
     manifest_path = data / "plugins/powercontext/.minimax-plugin/plugin.json"
     manifest = json.loads(manifest_path.read_bytes())
-    # Local resource checks pass, but the native V1 loader rejects an unknown field.
-    manifest["unsupportedField"] = True
+    # Local resource checks pass, but the native loader rejects a known field's invalid type.
+    manifest["displayName"] = 123
     manifest_path.write_text(json.dumps(manifest))
     result = invoke("doctor", "minimax", "--json")
     assert result.exit_code == 1
@@ -334,8 +334,9 @@ def _objects(value):
 
 
 class ModelGateway(ThreadingHTTPServer):
-    def __init__(self):
+    def __init__(self, *, allow_multiple_scope_tools=False):
         super().__init__(("127.0.0.1", 0), ModelHandler)
+        self.allow_multiple_scope_tools = allow_multiple_scope_tools
         self.requests: list[dict[str, Any]] = []
         self.request_observations: list[dict[str, Any]] = []
         self.invoked_tools: list[str] = []
@@ -344,8 +345,9 @@ class ModelGateway(ThreadingHTTPServer):
 
     def scope_tool(self, names):
         matches = sorted({name for name in names if name.endswith("list_scopes")})
-        if len(matches) != 1:
-            self.errors.append(f"Expected one isolated list_scopes tool, discovered {matches!r}; tools={names!r}")
+        if not matches or (len(matches) != 1 and not self.allow_multiple_scope_tools):
+            expected = "at least one" if self.allow_multiple_scope_tools else "one isolated"
+            self.errors.append(f"Expected {expected} list_scopes tool, discovered {matches!r}; tools={names!r}")
             return None
         return matches[0]
 
@@ -452,9 +454,9 @@ class ModelHandler(BaseHTTPRequestHandler):
             )
 
 
-@pytest.mark.parametrize("plugin_connection", [False, True], ids=["private-mcp", "plugin-mcp"])
+@pytest.mark.parametrize("route", ["private-mcp", "plugin-mcp", "installed-default"])
 @pytest.mark.parametrize("startup", ["cold", "preflight"])
-def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plugin_connection, startup, mcp_trace):
+def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, route, startup, mcp_trace):
     root, endpoint = host
     data = root / "mcp-tool"
     result = invoke(
@@ -479,11 +481,11 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
     bundle_entry = bundle["mcpServers"]["powercontext"]
     assert private_entry["url"] == bundle_entry["url"] == endpoint + "/mcp"
     assert private_entry["headers"] == bundle_entry["headers"] == {"Authorization": "Bearer acceptance-only-token"}
-    if plugin_connection:
+    if route == "plugin-mcp":
         del private["mcpServers"]["powercontext"]
         private_path.write_text(json.dumps(private), encoding="utf-8")
         assert "powercontext" not in json.loads(private_path.read_bytes())["mcpServers"]
-    else:
+    elif route == "private-mcp":
         disabled = subprocess.run(
             [COMMAND, "plugin", "disable", "powercontext@local", "--json"],
             env=environment,
@@ -493,6 +495,7 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
             check=False,
         )
         assert disabled.returncode == 0, disabled.stdout + disabled.stderr
+    if route != "plugin-mcp":
         assert private_entry.get("enabled", True) is True
     discovered = subprocess.run(
         [COMMAND, "plugin", "list", "--json"],
@@ -508,7 +511,7 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
         for item in json.loads(discovered.stdout)["installed"]
         if item["name"] == "powercontext" and item["marketplaceName"] == "local"
     ]
-    assert len(plugins) == 1 and plugins[0]["enabled"] is plugin_connection, discovered.stdout
+    assert len(plugins) == 1 and plugins[0]["enabled"] is (route != "private-mcp"), discovered.stdout
     marker = "MiniMax native MCP scope evidence"
     with httpx.Client(
         base_url=endpoint, headers={"Authorization": "Bearer acceptance-only-token"}, timeout=10
@@ -533,7 +536,7 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
         assert "list_scopes" in server_tools, preflight
     diagnostics = root / "native-diagnostics"
     evidence = root / "acceptance-evidence.json"
-    gateway = ModelGateway()
+    gateway = ModelGateway(allow_multiple_scope_tools=route == "installed-default")
     scope_result_matched = False
     thread = threading.Thread(target=gateway.serve_forever, daemon=True)
     thread.start()
@@ -611,7 +614,7 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
         }
         assert any(event.get("response_has_list_scopes") is True for event in mcp_trace), str(evidence)
         assert len(set(gateway.invoked_tools)) == 1, gateway.invoked_tools
-        if plugin_connection:
+        if route != "private-mcp":
             assert any("powercontext-project-context" in json.dumps(request) for request in gateway.requests)
     finally:
         gateway.shutdown()
@@ -620,7 +623,7 @@ def test_real_host_invokes_powercontext_mcp_with_controlled_inference(host, plug
         evidence.write_text(
             json.dumps(
                 {
-                    "route": "plugin-mcp" if plugin_connection else "private-mcp",
+                    "route": route,
                     "startup": startup,
                     "server_preflight": preflight,
                     "native_mcp_requests": mcp_trace,

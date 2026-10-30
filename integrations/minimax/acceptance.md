@@ -2,10 +2,10 @@
 
 ## Environment
 
-- Date: 2026-10-29.
+- Date: 2026-10-30.
 - Platform: Linux x86_64.
 - Node.js: 22.23.3.
-- Host: official npm `@minimax-ai/code@0.6.9`, installed into an isolated temporary prefix.
+- Host: official npm `@minimax-ai/code@0.6.9` and `@minimax-ai/code@0.7.2`, installed into separate isolated temporary prefixes.
 - PowerContext: working-tree CLI and Server, with SQLite and a synthetic local Bearer credential.
 - Targets: isolated temporary data directories, including spaces and Chinese characters. No personal MiniMax account, provider credentials, or user profile is used.
 
@@ -23,24 +23,25 @@ The tests start a real PowerContext HTTP Server and invoke the public setup/doct
 
 ## Qualification status
 
-The local Linux reference run passes eleven scenarios against the real CLI: explicit destination, `MINIMAX_DATA_DIR`, `MAVIS_DATA_DIR`, invalid-package/authentication diagnostics, private and plugin MCP calls under both cold and preflight startup, disabled private overrides with and without Authorization, and diagnosis of an uninstalled target. They verify repeated setup, the native loader's enabled local plugin record, required Skill/MCP counts, saved-target reuse, native disablement and its preservation during setup, omission of an invalid native manifest, and rejection of a wrong private Bearer header by the real Server.
+The 2026-10-29 Linux reference run passed eleven scenarios against the real CLI 0.6.9: explicit destination, `MINIMAX_DATA_DIR`, `MAVIS_DATA_DIR`, invalid-package/authentication diagnostics, private and plugin MCP calls under both cold and preflight startup, disabled private overrides with and without Authorization, and diagnosis of an uninstalled target. They verify repeated setup, the native loader's enabled local plugin record, required Skill/MCP counts, saved-target reuse, native disablement and its preservation during setup, omission of an invalid native manifest, and rejection of a wrong private Bearer header by the real Server.
 
-**Plugin-only tool injection remains unqualified for reliable use.** An independent Linux run with CLI 0.6.9 and Node.js 22.23.3 reports a connected, enabled plugin whose PowerContext tools never reach the model. The private-only case passes in that environment. Local passing runs do not resolve this failure, and this record does not establish reliable dual-route support.
+**Plugin-only tool injection remains unqualified for reliable use.** The affected Linux environment reproduces the failure with both official CLI 0.6.9 and 0.7.2 on Node.js 22.23.3: a connected, enabled plugin's PowerContext tools are unavailable to the model. The private-only cases pass in that environment. Local passing runs do not resolve this failure, and this record does not establish reliable dual-route support.
 
 Native discovery runs in a disposable profile containing the installed package and its enablement state. The real MiniMax profile is unchanged byte-for-byte across doctor, both before and after disabling the plugin through the real CLI. Diagnosing an uninstalled target does not create that target. Only the selected plugin's enablement is carried into the diagnostic runtime; real sessions and provider configuration are not imported.
 
 The disabled-private scenarios configure the incoming package to use an anonymous loopback Server while retaining a disabled private HTTPS endpoint. First and repeated setup preserve every byte of the private file, including a dormant credential when present. Real native discovery and CLI Server probes succeed against the bundled endpoint, and doctor leaves the file unchanged.
 
-The native tool scenarios first verify that setup synchronized the private and installed plugin MCP URLs and Authorization headers. Each case then isolates one connection before running `mcode exec` with a local OpenAI-compatible inference fixture:
+The native tool scenarios first verify that setup synchronized the private and installed plugin MCP URLs and Authorization headers. They exercise the default installation and independently isolate each connection before running `mcode exec` with a local OpenAI-compatible inference fixture:
 
 | Case | Private MCP configuration | Native plugin state |
 | --- | --- | --- |
 | `private-mcp` | Retain the enabled `powercontext` entry | Disable `powercontext@local` through the real CLI |
 | `plugin-mcp` | Remove the `powercontext` entry from the temporary profile | Keep `powercontext@local` enabled |
+| `installed-default` | Retain the enabled `powercontext` entry | Keep `powercontext@local` enabled |
 
 The real plugin list must confirm the expected enablement state. Each route runs with two startup modes. `cold` starts the native execution without a separate MCP preflight. `preflight` first uses an independent authenticated MCP client to initialize a real session and list tools at the configured endpoint, requiring `list_scopes` to be present. Preflight establishes Server MCP readiness; it does not populate the native process's connection cache or prove native tool injection. Each case uses a fresh Server database and native profile.
 
-The inference fixture selects the single discovered `list_scopes` tool, either directly or through `tool_search` and `mcp_invoke`. Empty, missing, or ambiguous tools fail qualification. Tool aliases are not used to identify the route. A successful case requires the seeded Scope ID and title in the result associated with the emitted MCP tool-call ID. The result parser reads both the initial text block and appended MCP structured content. The plugin case also requires the installed Skill to reach the model; the private case does not require a Skill from its disabled plugin. These assertions establish an authenticated call for that execution, without an external model provider.
+For each isolated route, the inference fixture selects the single discovered `list_scopes` tool, either directly or through `tool_search` and `mcp_invoke`; empty, missing, or ambiguous tools fail qualification. The default installation may expose equivalent tools from both configured connections, so it selects one discovered `list_scopes` tool while still rejecting an empty or missing result. Tool aliases are not used to identify the route. A successful case requires the seeded Scope ID and title in the result associated with the emitted MCP tool-call ID. The result parser reads both the initial text block and appended MCP structured content. The plugin and default cases also require the installed Skill to reach the model; the private case does not require a Skill from its disabled plugin. These assertions establish an authenticated call for that execution, without an external model provider.
 
 The fixed five-round local matrix at `f4345d04` completed all twenty executions successfully:
 
@@ -60,12 +61,27 @@ minimax_matrix_status=0
 for run in 1 2 3 4 5; do
   POWERCONTEXT_MINIMAX_ACCEPTANCE_COMMAND=/absolute/path/to/mcode \
     uv run python -m pytest tests/e2e/test_minimax_host.py \
-    -k controlled_inference -q \
+    -k 'controlled_inference and not installed-default' -q \
     --basetemp="/tmp/powercontext-minimax-acceptance-$run" \
     >"/tmp/powercontext-minimax-acceptance-$run.log" 2>&1 || minimax_matrix_status=1
 done
 test "$minimax_matrix_status" -eq 0
 ```
+
+## Affected-environment results
+
+The original failing Linux environment ran the unchanged four-case controlled-inference matrix on 2026-10-30 after merging master `0c1dfc289b28e9f529555fb57bf771ce51103913`. Each official CLI version used a separate installation prefix; the host bundles were not patched and no discovery latency was injected. Each native `tools/list` response contained 63 tools, including `list_scopes`.
+
+| Official CLI | Private, cold | Private, preflight | Plugin, cold | Plugin, preflight |
+| --- | --- | --- | --- | --- |
+| 0.6.9 | Seeded Scope matched | Seeded Scope matched | No Scope tool | No Scope tool |
+| 0.7.2 | Seeded Scope matched | Seeded Scope matched | No Scope tool | No Scope tool |
+
+CLI 0.6.9 exposed 81 tools in the private cases and only 18 built-ins in the plugin cases. CLI 0.7.2 exposed 20 tools and used deferred discovery through `tool_search` and `mcp_invoke`. The private cases discovered and invoked `list_scopes`, returning the seeded Scope ID and title; the plugin cases received an empty search result and failed the same Scope-tool assertion. An additional 0.7.2 cold plugin-only run configured both URLs with the canonical `/mcp/` path and still failed, so removing the HTTP redirect did not resolve the failure.
+
+The default installation with both the private MCP entry and the complete plugin enabled passed on official 0.7.2 under both cold and preflight startup. Each case discovered and invoked `mcp__powercontext__list_scopes` through `tool_search` and `mcp_invoke`, returned the seeded Scope ID and title associated with that tool call, and delivered `powercontext-project-context` to the model. This verifies the installed configuration and its private MCP fallback; it does not establish which connection would be selected after a future host fix or qualify the isolated plugin route.
+
+The shipped 0.7.2 runtime captures and retains a turn's capabilities before plugin discovery has necessarily published its inventory. A later successful inventory response does not replace that turn's captured capabilities. Its readiness method waits for initialization, cached restoration and directory watching; it does not wait for the background discovery/publication operation. Startup hooks also run after capability capture, so an independent MCP probe or a fixed delay in a hook does not establish a readiness barrier for that turn. The released host needs a discovery/publication barrier before final capability capture. PowerContext retains the failing isolated-route assertions; it does not patch an installed host, substitute the private route for the plugin test, or count an empty search result as acceptance.
 
 ## Tool-discovery diagnostics
 

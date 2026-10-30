@@ -14,7 +14,9 @@ PowerContext 安装 MiniMax 原生插件，包含 `powercontext-project-context`
 
 需要 Python 3.11+、PowerContext CLI 和运行中的 PowerContext Server。CLI、Server 和插件应来自同一仓库 revision。使用发布版本时，通过 `--ref` 指定与 Server 匹配的仓库 tag；插件 manifest 版本独立于 Python 包版本。远程 ref 沿用现有分支和标签约定；安装指定 commit 时，先在本地检出，再使用 `--source`。
 
-原生测试使用官方 npm CLI `@minimax-ai/code@0.6.9`，环境为 Linux x86_64、Node.js 22.23.3。仅插件 MCP 路径的工具注入尚未通过可靠性验收：宿主可能报告插件已连接，但未向模型暴露工具。setup 或 doctor 通过不能排除这一限制。桌面端发现和其他平台需要单独验收。具体命令、诊断产物和证据边界见[验收记录](https://github.com/oceanbase/powercontext/blob/master/integrations/minimax/acceptance.md)。
+原生测试覆盖官方 npm CLI `@minimax-ai/code` 的 0.6.9 和 0.7.2，环境为 Linux x86_64、Node.js 22.23.3。这两个版本的仅插件 MCP 路径均尚未通过可靠性验收：宿主可能报告插件已连接，但模型无法获取工具，包括通过 `tool_search` 发现工具。升级至 0.7.2，或 setup、doctor 通过，都不能排除这一限制。桌面端发现和其他平台需要单独验收。具体命令、诊断产物和证据边界见[验收记录](https://github.com/oceanbase/powercontext/blob/master/integrations/minimax/acceptance.md)。
+
+已验证的 0.7.2 安装流程同时保留 setup 创建的已启用私有 `powercontext` MCP 条目和完整插件：通过私有连接提供 MCP 工具，并保留插件 Skill。删除或禁用私有条目后，会依赖尚未通过验收的仅插件路径。setup 会保留既有禁用偏好；如果选择使用这条已验证路径，请在 `mcp.json` 中显式启用该私有条目，再运行 `powercontext config agent minimax` 并重启 MiniMax。
 
 ## 安装与选择目标
 
